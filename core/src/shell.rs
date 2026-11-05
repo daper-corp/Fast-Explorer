@@ -9,7 +9,7 @@ use std::path::{Path, PathBuf};
 use windows::Win32::Foundation::{ERROR_ACCESS_DENIED, HANDLE, HGLOBAL, HWND, POINT};
 use windows::Win32::Storage::FileSystem::{MOVE_FILE_FLAGS, MoveFileExW};
 use windows::Win32::System::Com::{
-    CLSCTX_ALL, COINIT_APARTMENTTHREADED, COINIT_DISABLE_OLE1DDE, CoCreateInstance, CoInitializeEx,
+    CLSCTX_ALL, COINIT_APARTMENTTHREADED, COINIT_DISABLE_OLE1DDE, CoCreateInstance, CoInitializeEx, CoTaskMemFree,
     CoUninitialize,
 };
 use windows::Win32::System::DataExchange::{
@@ -19,7 +19,7 @@ use windows::Win32::System::DataExchange::{
 use windows::Win32::System::Memory::{GMEM_MOVEABLE, GlobalAlloc, GlobalLock, GlobalUnlock};
 use windows::Win32::System::Ole::{CF_HDROP, CF_UNICODETEXT};
 use windows::Win32::UI::Shell::{
-    DROPFILES, DragQueryFileW, FOF_ALLOWUNDO, FOF_NO_UI, FOF_NOCONFIRMMKDIR, FOF_RENAMEONCOLLISION,
+    DROPFILES, DragQueryFileW, FOF_ALLOWUNDO, FOLDERID_ProgramFiles, KF_FLAG_DEFAULT, SHGetKnownFolderPath, FOF_NO_UI, FOF_NOCONFIRMMKDIR, FOF_RENAMEONCOLLISION,
     FOFX_ADDUNDORECORD, FileOperation, HDROP, IFileOperation, IShellItem, SEE_MASK_NOASYNC, SEE_MASK_NOCLOSEPROCESS,
     SHCreateItemFromParsingName, SHELLEXECUTEINFOW, ShellExecuteExW,
 };
@@ -96,6 +96,21 @@ pub fn rename(path: &Path, new_name: &str, owner: Option<isize>) -> io::Result<b
         }
         Err(e) => Err(e.into()),
     }
+}
+
+/// The real Program Files folder. Never taken from environment variables, which the user controls.
+pub fn program_files() -> io::Result<PathBuf> {
+    unsafe {
+        let p = SHGetKnownFolderPath(&FOLDERID_ProgramFiles, KF_FLAG_DEFAULT, None)?;
+        let path = p.to_string().map_err(io::Error::other);
+        CoTaskMemFree(Some(p.0 as _));
+        Ok(PathBuf::from(path?))
+    }
+}
+
+/// Where the index service is installed (admin-only writable).
+pub fn install_dir() -> io::Result<PathBuf> {
+    Ok(program_files()?.join("Fast Explorer"))
 }
 
 /// Yes/No question box (default: Yes). Blocks, so call it off the UI thread.

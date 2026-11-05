@@ -12,24 +12,26 @@ use std::ffi::OsString;
 use std::fs::File;
 use std::io::{BufRead, BufReader, BufWriter, Read, Write};
 use std::os::windows::io::{AsRawHandle, FromRawHandle};
-use std::path::PathBuf;
+use std::collections::HashMap;
+use std::path::{Path, PathBuf};
 use std::sync::atomic::{AtomicBool, Ordering};
 use std::sync::{Arc, RwLock, mpsc};
 use std::thread;
 use std::time::Duration;
 
-use fex_core::index::{self, PIPE_NAME, SERVICE_NAME, Volume};
+use fex_core::index::{self, Hit, PIPE_NAME, SERVICE_NAME, Volume};
 use windows::Win32::Foundation::{ERROR_PIPE_CONNECTED, GetLastError, HANDLE, HLOCAL, LocalFree};
 use windows::Win32::Security::Authorization::{
     ConvertSidToStringSidW, ConvertStringSecurityDescriptorToSecurityDescriptorW, SDDL_REVISION_1,
 };
-use windows::Win32::Security::{GetTokenInformation, PSECURITY_DESCRIPTOR, SECURITY_ATTRIBUTES, TOKEN_QUERY, TOKEN_USER, TokenUser};
+use windows::Win32::Security::{RevertToSelf, GetTokenInformation, PSECURITY_DESCRIPTOR, SECURITY_ATTRIBUTES, TOKEN_QUERY, TOKEN_USER, TokenUser};
 use windows::Win32::Storage::FileSystem::{
-    FILE_FLAG_FIRST_PIPE_INSTANCE, FlushFileBuffers, GetDriveTypeW, GetLogicalDrives, GetVolumeInformationW,
+    CreateFileW, FILE_FLAG_BACKUP_SEMANTICS, FILE_FLAG_FIRST_PIPE_INSTANCE, FILE_LIST_DIRECTORY, FILE_SHARE_DELETE,
+    FILE_SHARE_READ, FILE_SHARE_WRITE, FlushFileBuffers, OPEN_EXISTING, GetDriveTypeW, GetLogicalDrives, GetVolumeInformationW,
     PIPE_ACCESS_DUPLEX,
 };
 use windows::Win32::System::Pipes::{
-    ConnectNamedPipe, CreateNamedPipeW, PIPE_READMODE_BYTE, PIPE_REJECT_REMOTE_CLIENTS, PIPE_TYPE_BYTE,
+    ConnectNamedPipe, CreateNamedPipeW, ImpersonateNamedPipeClient, PIPE_READMODE_BYTE, PIPE_REJECT_REMOTE_CLIENTS, PIPE_TYPE_BYTE,
     PIPE_UNLIMITED_INSTANCES, PIPE_WAIT,
 };
 use windows::Win32::System::Threading::{GetCurrentProcess, OpenProcessToken};
@@ -251,11 +253,21 @@ fn answer(pipe: File, slots: &[Slot]) {
     let mut out = BufWriter::new(&pipe);
     let _ = match (f.next(), f.next().and_then(|n| n.parse::<usize>().ok()), f.next()) {
         (Some("S"), Some(limit), Some(query)) => {
+            let want = limit.clamp(1, MAX_LIMIT);
+            // Fetch extra: some hits may be hidden from this client below.
+            let fetch = want * 4;
             let guards: Vec<_> = slots.iter().map(|s| s.index.read().unwrap()).collect();
-            let (total, hits) = index::search(guards.iter().map(|g| &**g), query, limit.min(MAX_LIMIT));
+            let (matched, hits) = index::search(guards.iter().map(|g| &**g), query, fetch);
             drop(guards);
+            let checked_all = matched <= fetch;
+            let visible = visible_to_client(HANDLE(pipe.as_raw_handle()), hits, if checked_all { usize::MAX } else { want + 1 });
+            // Only ever report what this client may see: the unfiltered `matched` count would tell
+            // it whether hidden files with a given name exist. `more` likewise comes from visible
+            // hits alone (so it can miss visible matches beyond the fetched ones, never leak).
+            let more = visible.len() > want;
+            let hits = &visible[..visible.len().min(want)];
             let indexing = slots.iter().filter(|s| !s.ready.load(Ordering::Relaxed)).count();
-            index::encode_results(&mut out, total, &hits, indexing)
+            index::encode_results(&mut out, hits, indexing, more)
         }
         _ => writeln!(out, "ERR\t알 수 없는 요청"),
     };
@@ -265,11 +277,48 @@ fn answer(pipe: File, slots: &[Slot]) {
     }
 }
 
+/// The service sees every name on the volume; the client gets only those in folders it could
+/// list itself (checked as the client, so other users' private folders stay private).
+/// Fails closed: no impersonation, no hits. Stops after `keep` visible hits (each new folder
+/// costs a CreateFile).
+fn visible_to_client(pipe: HANDLE, hits: Vec<Hit>, keep: usize) -> Vec<Hit> {
+    if unsafe { ImpersonateNamedPipeClient(pipe) }.is_err() {
+        return Vec::new();
+    }
+    let mut listable: HashMap<PathBuf, bool> = HashMap::new();
+    let kept = hits
+        .into_iter()
+        .filter(|h| {
+            let dir = h.path.parent().unwrap_or(&h.path).to_path_buf();
+            *listable.entry(dir).or_insert_with_key(|d| can_list(d))
+        })
+        .take(keep)
+        .collect();
+    // Never keep serving with the client's identity.
+    unsafe { RevertToSelf() }.expect("RevertToSelf");
+    kept
+}
+
+fn can_list(dir: &Path) -> bool {
+    unsafe {
+        CreateFileW(
+            &HSTRING::from(dir.as_os_str()),
+            FILE_LIST_DIRECTORY.0,
+            FILE_SHARE_READ | FILE_SHARE_WRITE | FILE_SHARE_DELETE,
+            None,
+            OPEN_EXISTING,
+            FILE_FLAG_BACKUP_SEMANTICS,
+            None,
+        )
+        .map(|h| drop(Owned::new(h)))
+        .is_ok()
+    }
+}
+
 // ---------- install ----------
 
-fn install_dir() -> PathBuf {
-    let base = std::env::var_os("ProgramW6432").or_else(|| std::env::var_os("ProgramFiles")).unwrap_or("C:\\Program Files".into());
-    PathBuf::from(base).join("Fast Explorer")
+fn install_dir() -> Res<PathBuf> {
+    Ok(fex_core::shell::install_dir()?)
 }
 
 /// Copies this exe to Program Files (a SYSTEM service must not run from a user-writable
@@ -279,7 +328,7 @@ fn install() -> Res<()> {
     let manager = ServiceManager::local_computer(None::<&str>, ServiceManagerAccess::CONNECT | ServiceManagerAccess::CREATE_SERVICE)?;
     remove_service(&manager)?; // reinstalling replaces the old one
 
-    let dir = install_dir();
+    let dir = install_dir()?;
     std::fs::create_dir_all(&dir)?;
     let exe = dir.join("fex-index.exe");
     std::fs::copy(std::env::current_exe()?, &exe)?;
@@ -306,8 +355,9 @@ fn install() -> Res<()> {
 fn uninstall() -> Res<()> {
     let manager = ServiceManager::local_computer(None::<&str>, ServiceManagerAccess::CONNECT)?;
     remove_service(&manager)?;
-    let _ = std::fs::remove_file(install_dir().join("fex-index.exe"));
-    let _ = std::fs::remove_dir(install_dir());
+    let dir = install_dir()?;
+    let _ = std::fs::remove_file(dir.join("fex-index.exe"));
+    let _ = std::fs::remove_dir(dir);
     println!("removed {SERVICE_NAME}");
     Ok(())
 }

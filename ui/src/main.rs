@@ -921,8 +921,8 @@ impl App {
         t.cursor.set(None);
         t.anchor.set(None);
         let mut note = format!("검색 {:.0} ms", ms(took));
-        if res.total > paths.len() {
-            note += &format!(" · {}개 일치, 처음 {}개 표시", res.total, paths.len());
+        if res.more {
+            note += &format!(" · 더 있음, 처음 {}개 표시", paths.len());
         }
         if res.indexing > 0 {
             note += " · 색인 중이라 결과가 아직 일부";
@@ -963,7 +963,16 @@ impl App {
             return self.set_note(&t, "검색에는 인덱스 서비스가 필요함 (설치되지 않음)".into());
         }
         let hwnd = self.hwnd();
-        let exe = std::env::current_exe().unwrap_or_default().with_file_name("fex-index.exe");
+        let here = std::env::current_exe().unwrap_or_default();
+        // Elevating an exe the user (or anything running as them) can overwrite would hand that
+        // code admin rights; only offer it from an admin-only folder such as Program Files.
+        if !shell::program_files().is_ok_and(|pf| here.starts_with(pf)) {
+            return self.set_note(
+                &t,
+                "인덱스 서비스가 설치되지 않음 · 관리자 권한으로 'fex-index install'을 실행하세요".into(),
+            );
+        }
+        let exe = here.with_file_name("fex-index.exe");
         thread::spawn(move || {
             let ask = "모든 드라이브를 즉시 검색하려면 Fast Explorer 인덱스 서비스가 필요합니다.\n\n\
                 지금 설치할까요?\n\

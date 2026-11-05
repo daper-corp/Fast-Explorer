@@ -413,18 +413,20 @@ pub fn read_changes(vol: HANDLE, pos: &mut JournalPos, buf: &mut [u8], apply: im
 // ---------- the pipe protocol ----------
 //
 // Request:  S <limit> <query>\n
-// Reply:    OK <total> <count> <indexing-volumes>\n  then `count` lines:  d|f <path>\n
+// Reply:    OK <count> <indexing-volumes> <more 0|1>\n  then `count` lines:  d|f <path>\n
 //           ERR <message>\n
+// No overall match count is sent: it would include files hidden from the client.
 
 pub struct Results {
-    pub total: usize,
     pub hits: Vec<Hit>,
+    /// More visible matches exist than were returned.
+    pub more: bool,
     /// Volumes still being indexed (results from them are incomplete).
     pub indexing: usize,
 }
 
-pub fn encode_results(out: &mut impl Write, total: usize, hits: &[Hit], indexing: usize) -> io::Result<()> {
-    writeln!(out, "OK\t{total}\t{}\t{indexing}", hits.len())?;
+pub fn encode_results(out: &mut impl Write, hits: &[Hit], indexing: usize, more: bool) -> io::Result<()> {
+    writeln!(out, "OK\t{}\t{indexing}\t{}", hits.len(), more as u8)?;
     for h in hits {
         writeln!(out, "{}\t{}", if h.dir { 'd' } else { 'f' }, enc_path(&h.path))?;
     }
@@ -442,14 +444,14 @@ pub fn decode_results(input: impl BufRead) -> io::Result<Results> {
         _ => return Err(bad()),
     }
     let mut num = || f.next().and_then(|s| s.parse::<usize>().ok()).ok_or_else(bad);
-    let (total, count, indexing) = (num()?, num()?, num()?);
-    let mut hits = Vec::with_capacity(count);
+    let (count, indexing, more) = (num()?, num()?, num()? != 0);
+    let mut hits = Vec::with_capacity(count.min(1 << 16));
     for line in lines.take(count) {
         let line = line?;
         let (kind, path) = line.split_once('\t').ok_or_else(bad)?;
         hits.push(Hit { path: dec_path(path), dir: kind == "d" });
     }
-    Ok(Results { total, hits, indexing })
+    Ok(Results { hits, more, indexing })
 }
 
 #[derive(Debug)]
@@ -591,8 +593,8 @@ mod tests {
 
         let hits = vec![Hit { path: r"C:\a.txt".into(), dir: false }, Hit { path: "C:\\odd\tname".into(), dir: true }];
         let mut buf = Vec::new();
-        encode_results(&mut buf, 9, &hits, 1).unwrap();
+        encode_results(&mut buf, &hits, 1, true).unwrap();
         let r = decode_results(&buf[..]).unwrap();
-        assert_eq!((r.total, r.hits, r.indexing), (9, hits, 1));
+        assert_eq!((r.hits, r.indexing, r.more), (hits, 1, true));
     }
 }

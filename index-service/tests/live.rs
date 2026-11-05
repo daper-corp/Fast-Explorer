@@ -21,7 +21,15 @@ fn live_service() {
     for q in ["system32", "notepad.exe", "보고서", "a", "fex index", "zzzz-no-such-name-zzzz"] {
         let t = Instant::now();
         let r = query(q, 2000).unwrap();
-        eprintln!("{q:>24}: {:>8} matches, {:>4} returned, {:?}", r.total, r.hits.len(), t.elapsed());
+        eprintln!("{q:>24}: {:>4} returned{}, {:?}", r.hits.len(), if r.more { " (more)" } else { "" }, t.elapsed());
+    }
+    // Only hits in folders this (non-elevated) user may list come back: admin-only places such as
+    // System32\config or System Volume Information stay hidden.
+    for q in ["SAM.LOG1", "IndexerVolumeGuid", "tracking.log", "desktop.ini"] {
+        let r = query(q, 2000).unwrap();
+        let hidden = r.hits.iter().filter(|h| std::fs::read_dir(h.path.parent().unwrap()).is_err()).count();
+        eprintln!("{q:>24}: {} visible hits, {hidden} in unreadable folders", r.hits.len());
+        assert_eq!(hidden, 0, "{q}: hits leaked from folders the user can't list");
     }
     let r = query("notepad.exe", 5).unwrap();
     for h in &r.hits {
