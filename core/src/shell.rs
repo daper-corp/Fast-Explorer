@@ -20,11 +20,12 @@ use windows::Win32::System::Memory::{GMEM_MOVEABLE, GlobalAlloc, GlobalLock, Glo
 use windows::Win32::System::Ole::{CF_HDROP, CF_UNICODETEXT};
 use windows::Win32::UI::Shell::{
     DROPFILES, DragQueryFileW, FOF_ALLOWUNDO, FOF_NO_UI, FOF_NOCONFIRMMKDIR, FOF_RENAMEONCOLLISION,
-    FOFX_ADDUNDORECORD, FileOperation, HDROP, IFileOperation, IShellItem, SEE_MASK_NOASYNC,
+    FOFX_ADDUNDORECORD, FileOperation, HDROP, IFileOperation, IShellItem, SEE_MASK_NOASYNC, SEE_MASK_NOCLOSEPROCESS,
     SHCreateItemFromParsingName, SHELLEXECUTEINFOW, ShellExecuteExW,
 };
-use windows::Win32::UI::WindowsAndMessaging::SW_SHOWNORMAL;
-use windows::core::{HSTRING, PCWSTR, w};
+use windows::Win32::System::Threading::{GetExitCodeProcess, INFINITE, WaitForSingleObject};
+use windows::Win32::UI::WindowsAndMessaging::{IDYES, MB_ICONQUESTION, MB_YESNO, MessageBoxW, SW_HIDE, SW_SHOWNORMAL};
+use windows::core::{HSTRING, Owned, PCWSTR, w};
 
 pub enum Op {
     Copy(Vec<PathBuf>, PathBuf),
@@ -95,6 +96,36 @@ pub fn rename(path: &Path, new_name: &str, owner: Option<isize>) -> io::Result<b
         }
         Err(e) => Err(e.into()),
     }
+}
+
+/// Yes/No question box (default: Yes). Blocks, so call it off the UI thread.
+pub fn confirm(owner: isize, text: &str) -> bool {
+    let r = unsafe { MessageBoxW(Some(HWND(owner as _)), &HSTRING::from(text), w!("Fast Explorer"), MB_YESNO | MB_ICONQUESTION) };
+    r == IDYES
+}
+
+/// Runs `exe args` as administrator (UAC prompt) and waits; returns its exit code.
+/// Declining the prompt is an error (ERROR_CANCELLED).
+pub fn run_elevated(exe: &Path, args: &str, owner: isize) -> io::Result<u32> {
+    let (file, params) = (HSTRING::from(exe.as_os_str()), HSTRING::from(args));
+    with_com(|| unsafe {
+        let mut info = SHELLEXECUTEINFOW {
+            cbSize: size_of::<SHELLEXECUTEINFOW>() as u32,
+            fMask: SEE_MASK_NOCLOSEPROCESS | SEE_MASK_NOASYNC,
+            hwnd: HWND(owner as _),
+            lpVerb: w!("runas"),
+            lpFile: PCWSTR(file.as_ptr()),
+            lpParameters: PCWSTR(params.as_ptr()),
+            nShow: SW_HIDE.0,
+            ..Default::default()
+        };
+        ShellExecuteExW(&mut info)?;
+        let process = Owned::new(info.hProcess);
+        WaitForSingleObject(*process, INFINITE);
+        let mut code = 0;
+        GetExitCodeProcess(*process, &mut code)?;
+        Ok(code)
+    })
 }
 
 /// Opens a file with its default handler (or the "Open with" picker).

@@ -1,5 +1,6 @@
 //! Fex core: UI-independent engine (directory listing, sorting, formatting, shell actions).
 
+pub mod index;
 pub mod menu;
 pub mod shell;
 
@@ -36,6 +37,11 @@ pub struct Entry {
 }
 
 impl Entry {
+    /// An entry that didn't come from a listing, e.g. a search hit.
+    pub fn new(name: &std::ffi::OsStr, size: u64, modified: i64, attrs: u32) -> Self {
+        Entry { name: name.encode_wide().chain(Some(0)).collect(), size, modified, attrs }
+    }
+
     /// Display name (lossy). Build paths with [`Entry::os_name`], which keeps the exact name.
     pub fn name(&self) -> String {
         String::from_utf16_lossy(&self.name[..self.name.len() - 1])
@@ -180,6 +186,9 @@ fn logical_cmp(a: &[u16], b: &[u16]) -> Ordering {
 
 /// FILETIME -> "YYYY-MM-DD HH:MM" in local time.
 pub fn format_filetime(ft: i64) -> String {
+    if ft <= 0 {
+        return String::new(); // unknown
+    }
     let ft = FILETIME { dwLowDateTime: ft as u32, dwHighDateTime: (ft >> 32) as u32 };
     let (mut utc, mut local) = (SYSTEMTIME::default(), SYSTEMTIME::default());
     unsafe {

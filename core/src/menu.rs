@@ -111,18 +111,19 @@ fn one_line(s: &str) -> String {
     s.replace(['\t', '\r', '\n'], " ")
 }
 
-/// Paths travel as text; ones that aren't valid Unicode (lone surrogates) go as hex UTF-16
-/// behind a `\x01` marker so they arrive exactly as they were.
-fn enc_path(p: &Path) -> String {
+/// Paths travel as text. Any that could break the tab/newline framing (control characters,
+/// which NTFS's POSIX namespace allows in names) or aren't valid Unicode (lone surrogates) go
+/// as hex UTF-16 behind a `\x01` marker, so they arrive exactly as they were.
+pub fn enc_path(p: &Path) -> String {
     match p.to_str() {
-        Some(s) => s.to_string(),
-        None => std::iter::once("\x01".to_string())
+        Some(s) if !s.chars().any(char::is_control) => s.to_string(),
+        _ => std::iter::once("\x01".to_string())
             .chain(p.as_os_str().encode_wide().map(|u| format!("{u:04x}")))
             .collect(),
     }
 }
 
-fn dec_path(s: &str) -> PathBuf {
+pub fn dec_path(s: &str) -> PathBuf {
     match s.strip_prefix('\x01') {
         Some(hex) => {
             let units: Vec<u16> = (0..hex.len() / 4)
@@ -318,8 +319,11 @@ mod tests {
     #[test]
     fn requests_and_items_round_trip() {
         let odd = PathBuf::from(std::ffi::OsString::from_wide(&[b'a' as u16, 0xD800, b'b' as u16]));
+        // A POSIX-namespace name with a tab must not split into two paths.
+        let tab = PathBuf::from("C:\\x\ty\nz.txt");
+        assert!(!enc_path(&tab).contains(['\t', '\n']));
         for r in [
-            Request::Items { seq: 7, paths: vec![r"C:\a b\x.txt".into(), odd.clone()] },
+            Request::Items { seq: 7, paths: vec![r"C:\a b\x.txt".into(), odd.clone(), tab] },
             Request::Background { seq: 8, folder: r"C:\".into() },
             Request::Invoke { seq: 9, id: 42 },
             Request::Verb { seq: 10, verb: "properties".into(), paths: vec![odd] },

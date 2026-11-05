@@ -9,6 +9,8 @@ export struct Row {
     editing: bool,
     // UTF-8 byte length of the name without its extension (pre-selected when renaming).
     stem: int,
+    // Folder of a search hit; empty when browsing a folder.
+    location: string,
 }
 
 export struct TabInfo {
@@ -59,6 +61,8 @@ export component AppWindow inherits Window {
     in property <[Row]> rows;
     in-out property <string> path;
     in property <string> status;
+    in property <bool> search-mode;
+    in-out property <string> search-text;
     in property <bool> can-back;
     in property <bool> can-forward;
     in property <int> sort-column;
@@ -71,6 +75,7 @@ export component AppWindow inherits Window {
     out property <length> list-origin-y: list.absolute-position.y;
 
     callback navigate(string);
+    callback search(string);
     callback back();
     callback forward();
     callback up();
@@ -96,7 +101,13 @@ export component AppWindow inherits Window {
         address.select-all();
     }
 
-    private property <length> w-name: 440px;
+    public function focus-search() {
+        search-box.focus();
+        search-box.select-all();
+    }
+
+    private property <length> w-name: root.search-mode ? 300px : 440px;
+    private property <length> w-location: 360px;
     private property <length> w-date: 150px;
     private property <length> w-kind: 130px;
     private property <length> w-size: 100px;
@@ -203,6 +214,14 @@ export component AppWindow inherits Window {
                         root.navigate(t);
                     }
                 }
+                search-box := LineEdit {
+                    width: 280px;
+                    placeholder-text: "모든 드라이브에서 검색 (Ctrl+F)";
+                    text <=> root.search-text;
+                    edited(t) => {
+                        root.search(t);
+                    }
+                }
             }
 
             // Column header
@@ -219,6 +238,10 @@ export component AppWindow inherits Window {
                         clicked => {
                             root.sort(0);
                         }
+                    }
+                    if root.search-mode: HeaderCell {
+                        width: root.w-location;
+                        text: "위치";
                     }
                     HeaderCell {
                         width: root.w-date;
@@ -334,6 +357,13 @@ export component AppWindow inherits Window {
                                         root.rename-done(self.text, true);
                                     }
                                 }
+                            }
+                            if root.search-mode: Text {
+                                width: root.w-location;
+                                text: r.location;
+                                overflow: elide;
+                                vertical-alignment: center;
+                                color: root.dim;
                             }
                             Text {
                                 width: root.w-date;

@@ -10,6 +10,7 @@ use std::sync::atomic::{AtomicU64, Ordering::SeqCst};
 use std::thread;
 use std::time::{Duration, Instant};
 
+use fex_core::index::{self, QueryError, Results};
 use fex_core::menu::{HANG_LIMIT, MenuHost, MenuItem, MenuResult, Request};
 use fex_core::shell::{self, Op};
 use fex_core::{Entry, SortKey, format_filetime, format_size, list_dir, sort_order};
@@ -42,6 +43,9 @@ const CMD_RETRY: u32 = 0x800D;
 /// How long a right-click waits for a shell menu that isn't prefetched yet.
 const MENU_WAIT: Duration = Duration::from_millis(150);
 
+/// Most search hits shown (the status bar says how many matched in all).
+const SEARCH_LIMIT: usize = 2000;
+
 const SORT_KEYS: [SortKey; 4] = [SortKey::Name, SortKey::Modified, SortKey::Type, SortKey::Size];
 
 /// One folder's listing. A virtualized model: Slint asks only for the visible rows.
@@ -53,6 +57,8 @@ struct Rows {
     /// Selection by entry index, so it survives re-sorting.
     selected: RefCell<Vec<bool>>,
     editing: Cell<Option<u32>>,
+    /// Folder of each entry, for search hits (empty when listing a folder).
+    locations: RefCell<Vec<String>>,
     notify: ModelNotify,
 }
 
@@ -85,6 +91,7 @@ impl Model for Rows {
             editing: self.editing.get() == Some(i),
             stem: stem as i32,
             name: name.into(),
+            location: self.locations.borrow().get(i as usize).map(|s| s.as_str().into()).unwrap_or_default(),
         })
     }
 
@@ -118,6 +125,7 @@ impl Rows {
         *self.selected.borrow_mut() = vec![false; entries.len()];
         *self.entries.borrow_mut() = Arc::new(entries);
         *self.order.borrow_mut() = order;
+        self.locations.borrow_mut().clear();
         self.editing.set(None);
         self.notify.reset();
     }
@@ -180,6 +188,8 @@ struct Tab {
     list_ms: Cell<f64>,
     note: RefCell<String>,
     scroll: Cell<f32>,
+    /// Showing search results instead of the folder: (query, path of each entry).
+    search: RefCell<Option<(String, Vec<PathBuf>)>>,
 }
 
 impl Tab {
@@ -200,12 +210,20 @@ impl Tab {
             list_ms: Cell::new(0.0),
             note: RefCell::default(),
             scroll: Cell::new(0.0),
+            search: RefCell::default(),
         }
     }
 
     /// Exact path (from the raw UTF-16 name, not the lossy display string).
     fn path_of(&self, idx: u32) -> PathBuf {
+        if let Some((_, paths)) = &*self.search.borrow() {
+            return paths[idx as usize].clone();
+        }
         self.cwd.borrow().join(self.rows.entries.borrow()[idx as usize].os_name())
+    }
+
+    fn query(&self) -> Option<String> {
+        self.search.borrow().as_ref().map(|s| s.0.clone())
     }
 
     fn title(&self) -> String {
@@ -236,6 +254,9 @@ struct App {
     prefetched: RefCell<Option<(bool, Vec<PathBuf>, u64)>>,
     /// Waiting for "더 많은 옵션"; no other query may supersede it meanwhile.
     menu_busy: Cell<bool>,
+    /// The newest search; workers for older ones stop and their results are dropped.
+    search_seq: Arc<AtomicU64>,
+    install_offered: Cell<bool>,
 }
 
 thread_local! {
@@ -365,6 +386,9 @@ impl App {
         let (key, desc) = t.sort.get();
         ui.set_sort_column(SORT_KEYS.iter().position(|&k| k == key).unwrap_or(0) as i32);
         ui.set_sort_desc(desc);
+        let query = t.query();
+        ui.set_search_mode(query.is_some());
+        ui.set_search_text(query.unwrap_or_default().into());
         self.sync_tabs();
         self.update_status(t);
     }
@@ -420,6 +444,7 @@ impl App {
     /// Makes a pending navigation the tab's current folder.
     fn commit(&self, t: &Rc<Tab>) {
         let Some((path, hist, after)) = t.pending.take() else { return };
+        t.search.take(); // going to a folder leaves the search results
         t.bump_sort();
         t.rows.replace(Vec::new(), Vec::new());
         t.cursor.set(None);
@@ -509,6 +534,9 @@ impl App {
     /// Re-lists the current folder in one piece (no flicker), keeping the selection by name
     /// unless `after` names what to select.
     fn reload(&self, t: &Rc<Tab>, after: After) {
+        if let Some(q) = t.query() {
+            return self.search_in(t, q); // refresh the results instead
+        }
         let epoch = t.epoch.fetch_add(1, SeqCst) + 1;
         *t.after.borrow_mut() = Some(after);
         let path = t.cwd.borrow().clone();
@@ -672,7 +700,12 @@ impl App {
             _ if alt && is(Key::RightArrow) => self.forward(),
             _ if alt && is(Key::UpArrow) => self.up(),
             _ if (ctrl && ch == 'l') || (alt && ch == 'd') || (!ctrl && is(Key::F4)) => self.ui().invoke_focus_address(),
+            _ if (ctrl && ch == 'f') || is(Key::F3) => self.ui().invoke_focus_search(),
             _ if is(Key::F5) || (ctrl && ch == 'r') => self.reload(&t, After::default()),
+            _ if is(Key::Escape) && t.search.borrow().is_some() => {
+                self.exit_search(&t);
+                self.ui().invoke_focus_list();
+            }
             _ if is(Key::Escape) && !in_list => {
                 self.sync_view(&t);
                 self.ui().invoke_focus_list();
@@ -834,6 +867,126 @@ impl App {
         self.resort(&t);
     }
 
+    // ---------- search ----------
+
+    /// Search box edits: search every drive through the index service.
+    fn search(&self, text: &str) {
+        let t = self.tab();
+        match text.trim() {
+            "" => self.exit_search(&t),
+            q => self.search_in(&t, q.to_string()),
+        }
+    }
+
+    fn search_in(&self, t: &Rc<Tab>, query: String) {
+        let seq = self.search_seq.fetch_add(1, SeqCst) + 1;
+        let (id, latest) = (t.id, self.search_seq.clone());
+        thread::spawn(move || {
+            let start = Instant::now();
+            let r = index::query(&query, SEARCH_LIMIT);
+            let took = start.elapsed();
+            if latest.load(SeqCst) != seq {
+                return; // typed on; a newer search is running
+            }
+            match r {
+                Ok(res) => {
+                    // The index holds names only; size and date come from the file system.
+                    let entries = res.hits.iter().map(hit_entry).collect();
+                    post(move |a| a.found(id, seq, query, res, entries, took));
+                }
+                Err(QueryError::NotInstalled) => post(move |a| a.offer_install(id, query)),
+                Err(QueryError::Unavailable(e)) => post(move |a| {
+                    if let Some(t) = a.find(id) {
+                        a.set_note(&t, format!("검색할 수 없음: {e}"));
+                    }
+                }),
+            }
+        });
+    }
+
+    fn found(&self, id: u64, seq: u64, query: String, res: Results, entries: Vec<Entry>, took: Duration) {
+        let Some(t) = self.find(id) else { return };
+        if self.search_seq.load(SeqCst) != seq {
+            return;
+        }
+        t.epoch.fetch_add(1, SeqCst); // drop any folder listing still arriving
+        t.pending.take();
+        let (key, desc) = t.sort.get();
+        let order = sort_order(&entries, key, desc);
+        let paths: Vec<PathBuf> = res.hits.into_iter().map(|h| h.path).collect();
+        let locations = paths.iter().map(|p| p.parent().map(|d| d.display().to_string()).unwrap_or_default()).collect();
+        t.bump_sort();
+        t.rows.replace(entries, order);
+        *t.rows.locations.borrow_mut() = locations;
+        t.cursor.set(None);
+        t.anchor.set(None);
+        let mut note = format!("검색 {:.0} ms", ms(took));
+        if res.total > paths.len() {
+            note += &format!(" · {}개 일치, 처음 {}개 표시", res.total, paths.len());
+        }
+        if res.indexing > 0 {
+            note += " · 색인 중이라 결과가 아직 일부";
+            // Ask again shortly, until the index is complete.
+            let q = query.clone();
+            slint::Timer::single_shot(Duration::from_secs(2), move || {
+                app(|a| {
+                    if let Some(t) = a.find(id)
+                        && a.search_seq.load(SeqCst) == seq
+                        && t.query().as_deref() == Some(&q)
+                    {
+                        a.search_in(&t, q);
+                    }
+                })
+            });
+        }
+        *t.search.borrow_mut() = Some((query, paths));
+        *t.note.borrow_mut() = note;
+        if self.is_active(&t) {
+            self.ui().set_search_mode(true);
+            self.ui().set_list_y(0.0);
+        }
+        self.update_status(&t);
+    }
+
+    fn exit_search(&self, t: &Rc<Tab>) {
+        self.search_seq.fetch_add(1, SeqCst); // results still on their way are dropped
+        if t.search.take().is_some() {
+            self.reload(t, After::default());
+        }
+        self.sync_view(t);
+    }
+
+    /// The first search without the index service asks to install it (UAC).
+    fn offer_install(&self, id: u64, query: String) {
+        let Some(t) = self.find(id) else { return };
+        if self.install_offered.replace(true) {
+            return self.set_note(&t, "검색에는 인덱스 서비스가 필요함 (설치되지 않음)".into());
+        }
+        let hwnd = self.hwnd();
+        let exe = std::env::current_exe().unwrap_or_default().with_file_name("fex-index.exe");
+        thread::spawn(move || {
+            let ask = "모든 드라이브를 즉시 검색하려면 Fast Explorer 인덱스 서비스가 필요합니다.\n\n\
+                지금 설치할까요?\n\
+                · 관리자 권한(UAC)이 필요합니다.\n\
+                · 고정 NTFS 드라이브의 파일 이름만 색인합니다. 파일 내용은 읽지 않습니다.\n\
+                · 검색은 이 Windows 계정에서만 쓸 수 있습니다.";
+            let r = shell::confirm(hwnd, ask).then(|| shell::run_elevated(&exe, "install", hwnd));
+            post(move |a| {
+                let Some(t) = a.find(id) else { return };
+                match r {
+                    None => a.set_note(&t, "검색에는 인덱스 서비스가 필요함".into()),
+                    Some(Ok(0)) => {
+                        a.set_note(&t, "인덱스 서비스 설치됨 · 색인 중…".into());
+                        // Give the service a moment to open its pipe.
+                        slint::Timer::single_shot(Duration::from_secs(1), move || app(|a| a.search_in(&t, query)));
+                    }
+                    Some(Ok(code)) => a.set_note(&t, format!("인덱스 서비스 설치 실패 (코드 {code})")),
+                    Some(Err(e)) => a.set_note(&t, format!("인덱스 서비스 설치 취소: {e}")),
+                }
+            });
+        });
+    }
+
     // ---------- context menus ----------
 
     fn next_seq(&self) -> u64 {
@@ -848,6 +1001,9 @@ impl App {
             && *p == paths
         {
             return Ok(*seq);
+        }
+        if !background && paths.iter().any(|p| p.parent() != paths[0].parent()) {
+            return Err("셸 메뉴는 한 폴더 안의 항목에만 쓸 수 있음".into()); // e.g. search hits
         }
         let seq = self.next_seq();
         let req = match background {
@@ -1196,6 +1352,16 @@ impl App {
     }
 }
 
+/// A search hit as a list entry, with size/date/attributes read from the file system.
+fn hit_entry(h: &index::Hit) -> Entry {
+    use std::os::windows::fs::MetadataExt;
+    let name = h.path.file_name().unwrap_or(h.path.as_os_str());
+    match std::fs::symlink_metadata(&h.path) {
+        Ok(m) => Entry::new(name, m.file_size(), m.last_write_time() as i64, m.file_attributes()),
+        Err(_) => Entry::new(name, 0, 0, if h.dir { 0x10 } else { 0 }), // gone since it was indexed
+    }
+}
+
 fn cursor_pos() -> (i32, i32) {
     let mut pt = POINT::default();
     unsafe {
@@ -1229,10 +1395,13 @@ fn main() -> Result<(), slint::PlatformError> {
             menu_seq: Cell::new(0),
             prefetched: RefCell::default(),
             menu_busy: Cell::new(false),
+            search_seq: Arc::default(),
+            install_offered: Cell::new(false),
         });
     });
 
     ui.on_navigate(|t| app(|a| a.address(&t)));
+    ui.on_search(|t| app(|a| a.search(&t)));
     ui.on_back(|| app(|a| a.back()));
     ui.on_forward(|| app(|a| a.forward()));
     ui.on_up(|| app(|a| a.up()));
