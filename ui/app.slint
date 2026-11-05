@@ -1,0 +1,346 @@
+import { LineEdit, Button, ListView, Palette } from "std-widgets.slint";
+
+export struct Row {
+    name: string,
+    date: string,
+    kind: string,
+    size: string,
+    selected: bool,
+    editing: bool,
+    // UTF-8 byte length of the name without its extension (pre-selected when renaming).
+    stem: int,
+}
+
+export struct TabInfo {
+    title: string,
+}
+
+component HeaderCell inherits Rectangle {
+    in property <string> text;
+    in property <bool> sorted;
+    in property <bool> descending;
+    callback clicked;
+
+    HorizontalLayout {
+        padding-left: 8px;
+        spacing: 6px;
+        alignment: start;
+        Text {
+            text: root.text;
+            vertical-alignment: center;
+            overflow: elide;
+            color: Palette.foreground;
+        }
+        Text {
+            text: !root.sorted ? "" : root.descending ? "▼" : "▲";
+            font-size: 8px;
+            vertical-alignment: center;
+            color: Palette.foreground;
+        }
+    }
+
+    TouchArea {
+        clicked => {
+            root.clicked();
+        }
+    }
+}
+
+export component AppWindow inherits Window {
+    in property <string> folder;
+    title: root.folder == "" ? "Fex" : root.folder + " - Fex";
+    preferred-width: 1100px;
+    preferred-height: 720px;
+    background: Palette.background;
+    forward-focus: list-focus;
+
+    in property <[TabInfo]> tabs;
+    in property <int> active-tab;
+    in property <[Row]> rows;
+    in-out property <string> path;
+    in property <string> status;
+    in property <bool> can-back;
+    in property <bool> can-forward;
+    in property <int> sort-column;
+    in property <bool> sort-desc;
+    in-out property <length> list-y <=> list.content-y;
+    out property <length> list-height: list.visible-height;
+    out property <length> row-height: 26px;
+
+    callback navigate(string);
+    callback back();
+    callback forward();
+    callback up();
+    callback tab-select(int);
+    callback tab-close(int);
+    callback tab-new();
+    callback sort(int);
+    callback row-pressed(int, KeyboardModifiers);
+    callback row-open(int);
+    callback rename-done(string, bool);
+    // `in-list` is true when the file list has focus; otherwise only global shortcuts apply.
+    callback key(KeyEvent, bool) -> bool;
+
+    public function focus-list() {
+        list-focus.focus();
+    }
+
+    public function focus-address() {
+        address.focus();
+        address.select-all();
+    }
+
+    private property <length> w-name: 440px;
+    private property <length> w-date: 150px;
+    private property <length> w-kind: 130px;
+    private property <length> w-size: 100px;
+    private property <brush> dim: Palette.foreground.transparentize(0.4);
+
+    FocusScope {
+        key-pressed(e) => {
+            root.key(e, false) ? EventResult.accept : EventResult.reject
+        }
+
+        VerticalLayout {
+            // Tabs
+            HorizontalLayout {
+                height: 36px;
+                padding: 4px;
+                padding-bottom: 0;
+                spacing: 2px;
+                alignment: start;
+                for t[i] in root.tabs: Rectangle {
+                    width: 200px;
+                    border-radius: 6px;
+                    background: i == root.active-tab ? Palette.alternate-background : tab-touch.has-hover ? Palette.foreground.transparentize(0.95) : transparent;
+                    tab-touch := TouchArea {
+                        pointer-event(e) => {
+                            if e.kind == PointerEventKind.down && e.button == PointerEventButton.left {
+                                root.tab-select(i);
+                            }
+                            if e.kind == PointerEventKind.up && e.button == PointerEventButton.middle {
+                                root.tab-close(i);
+                            }
+                        }
+                    }
+                    HorizontalLayout {
+                        padding-left: 12px;
+                        padding-right: 4px;
+                        Text {
+                            text: t.title;
+                            overflow: elide;
+                            vertical-alignment: center;
+                            horizontal-stretch: 1;
+                            color: Palette.foreground;
+                        }
+                        Rectangle {
+                            width: 24px;
+                            border-radius: 4px;
+                            background: close-touch.has-hover ? Palette.foreground.transparentize(0.9) : transparent;
+                            Text {
+                                text: "×";
+                                font-size: 16px;
+                                color: Palette.foreground;
+                            }
+                            close-touch := TouchArea {
+                                clicked => {
+                                    root.tab-close(i);
+                                }
+                            }
+                        }
+                    }
+                }
+                Rectangle {
+                    width: 32px;
+                    border-radius: 6px;
+                    background: new-touch.has-hover ? Palette.foreground.transparentize(0.95) : transparent;
+                    Text {
+                        text: "+";
+                        font-size: 16px;
+                        color: Palette.foreground;
+                    }
+                    new-touch := TouchArea {
+                        clicked => {
+                            root.tab-new();
+                        }
+                    }
+                }
+            }
+
+            // Navigation + address bar
+            HorizontalLayout {
+                padding: 6px;
+                spacing: 4px;
+                Button {
+                    text: "←";
+                    enabled: root.can-back;
+                    clicked => {
+                        root.back();
+                    }
+                }
+                Button {
+                    text: "→";
+                    enabled: root.can-forward;
+                    clicked => {
+                        root.forward();
+                    }
+                }
+                Button {
+                    text: "↑";
+                    clicked => {
+                        root.up();
+                    }
+                }
+                address := LineEdit {
+                    text <=> root.path;
+                    accepted(t) => {
+                        root.navigate(t);
+                    }
+                }
+            }
+
+            // Column header
+            Rectangle {
+                height: 28px;
+                HorizontalLayout {
+                    padding-left: 6px;
+                    alignment: start;
+                    HeaderCell {
+                        width: root.w-name;
+                        text: "이름";
+                        sorted: root.sort-column == 0;
+                        descending: root.sort-desc;
+                        clicked => {
+                            root.sort(0);
+                        }
+                    }
+                    HeaderCell {
+                        width: root.w-date;
+                        text: "수정한 날짜";
+                        sorted: root.sort-column == 1;
+                        descending: root.sort-desc;
+                        clicked => {
+                            root.sort(1);
+                        }
+                    }
+                    HeaderCell {
+                        width: root.w-kind;
+                        text: "유형";
+                        sorted: root.sort-column == 2;
+                        descending: root.sort-desc;
+                        clicked => {
+                            root.sort(2);
+                        }
+                    }
+                    HeaderCell {
+                        width: root.w-size;
+                        text: "크기";
+                        sorted: root.sort-column == 3;
+                        descending: root.sort-desc;
+                        clicked => {
+                            root.sort(3);
+                        }
+                    }
+                }
+                Rectangle {
+                    y: parent.height - 1px;
+                    height: 1px;
+                    background: Palette.border;
+                }
+            }
+
+            // File list (virtualized: only visible rows are instantiated)
+            list-focus := FocusScope {
+                vertical-stretch: 1;
+                key-pressed(e) => {
+                    root.key(e, true) ? EventResult.accept : EventResult.reject
+                }
+
+                list := ListView {
+                    width: 100%;
+                    height: 100%;
+                    for r[i] in root.rows: Rectangle {
+                        height: root.row-height;
+                        background: r.selected ? Palette.accent-background.transparentize(list-focus.has-focus ? 0.75 : 0.88) : row-touch.has-hover ? Palette.foreground.transparentize(0.95) : transparent;
+
+                        row-touch := TouchArea {
+                            pointer-event(e) => {
+                                if e.kind == PointerEventKind.down && e.button == PointerEventButton.left {
+                                    list-focus.focus();
+                                    root.row-pressed(i, e.modifiers);
+                                }
+                            }
+                            double-clicked => {
+                                root.row-open(i);
+                            }
+                        }
+
+                        HorizontalLayout {
+                            padding-left: 6px;
+                            alignment: start;
+                            if !r.editing: Text {
+                                width: root.w-name;
+                                text: r.name;
+                                overflow: elide;
+                                vertical-alignment: center;
+                                color: Palette.foreground;
+                            }
+                            if r.editing: LineEdit {
+                                width: root.w-name;
+                                text: r.name;
+                                init => {
+                                    self.focus();
+                                    self.set-selection-offsets(0, r.stem);
+                                }
+                                accepted(t) => {
+                                    root.rename-done(t, true);
+                                }
+                                key-pressed(e) => {
+                                    if e.text == Key.Escape {
+                                        root.rename-done("", false);
+                                        return accept;
+                                    }
+                                    reject
+                                }
+                                changed has-focus => {
+                                    if !self.has-focus {
+                                        root.rename-done(self.text, true);
+                                    }
+                                }
+                            }
+                            Text {
+                                width: root.w-date;
+                                text: r.date;
+                                vertical-alignment: center;
+                                color: root.dim;
+                            }
+                            Text {
+                                width: root.w-kind;
+                                text: r.kind;
+                                vertical-alignment: center;
+                                color: root.dim;
+                            }
+                            Text {
+                                width: root.w-size;
+                                text: r.size;
+                                horizontal-alignment: right;
+                                vertical-alignment: center;
+                                color: root.dim;
+                            }
+                        }
+                    }
+                }
+            }
+
+            // Status bar
+            HorizontalLayout {
+                padding: 6px;
+                padding-left: 10px;
+                Text {
+                    text: root.status;
+                    color: root.dim;
+                }
+            }
+        }
+    }
+}

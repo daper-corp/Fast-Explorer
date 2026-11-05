@@ -1,4 +1,6 @@
-//! Fex core: UI-independent engine (directory listing, sorting, formatting).
+//! Fex core: UI-independent engine (directory listing, sorting, formatting, shell actions).
+
+pub mod shell;
 
 use std::cmp::Ordering;
 use std::io;
