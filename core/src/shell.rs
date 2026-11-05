@@ -13,11 +13,11 @@ use windows::Win32::System::Com::{
     CoUninitialize,
 };
 use windows::Win32::System::DataExchange::{
-    CloseClipboard, EmptyClipboard, GetClipboardData, OpenClipboard, RegisterClipboardFormatW,
-    SetClipboardData,
+    CloseClipboard, EmptyClipboard, GetClipboardData, IsClipboardFormatAvailable, OpenClipboard,
+    RegisterClipboardFormatW, SetClipboardData,
 };
 use windows::Win32::System::Memory::{GMEM_MOVEABLE, GlobalAlloc, GlobalLock, GlobalUnlock};
-use windows::Win32::System::Ole::CF_HDROP;
+use windows::Win32::System::Ole::{CF_HDROP, CF_UNICODETEXT};
 use windows::Win32::UI::Shell::{
     DROPFILES, DragQueryFileW, FOF_ALLOWUNDO, FOF_NO_UI, FOF_NOCONFIRMMKDIR, FOF_RENAMEONCOLLISION,
     FOFX_ADDUNDORECORD, FileOperation, HDROP, IFileOperation, IShellItem, SEE_MASK_NOASYNC,
@@ -172,6 +172,21 @@ pub fn clipboard_get(owner: isize) -> Option<(Vec<PathBuf>, bool)> {
         });
         Some((paths, cut))
     }
+}
+
+pub fn clipboard_has_files() -> bool {
+    unsafe { IsClipboardFormatAvailable(CF_HDROP.0 as u32).is_ok() }
+}
+
+/// Puts plain text (e.g. copied paths) on the clipboard.
+pub fn clipboard_set_text(text: &str, owner: isize) -> io::Result<()> {
+    let bytes: Vec<u8> = text.encode_utf16().chain(Some(0)).flat_map(|c| c.to_le_bytes()).collect();
+    unsafe {
+        let _clip = Clipboard::open(owner)?;
+        EmptyClipboard()?;
+        SetClipboardData(CF_UNICODETEXT.0 as u32, Some(global(&bytes)?))?;
+    }
+    Ok(())
 }
 
 /// Empties the clipboard (Explorer does this after pasting a cut).

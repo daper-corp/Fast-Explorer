@@ -1,5 +1,6 @@
 //! Fex core: UI-independent engine (directory listing, sorting, formatting, shell actions).
 
+pub mod menu;
 pub mod shell;
 
 use std::cmp::Ordering;
@@ -35,8 +36,14 @@ pub struct Entry {
 }
 
 impl Entry {
+    /// Display name (lossy). Build paths with [`Entry::os_name`], which keeps the exact name.
     pub fn name(&self) -> String {
         String::from_utf16_lossy(&self.name[..self.name.len() - 1])
+    }
+
+    pub fn os_name(&self) -> std::ffi::OsString {
+        use std::os::windows::ffi::OsStringExt;
+        std::ffi::OsString::from_wide(&self.name[..self.name.len() - 1])
     }
 
     pub fn is_dir(&self) -> bool {

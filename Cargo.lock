@@ -1166,12 +1166,21 @@ dependencies = [
  "raw-window-handle",
  "slint",
  "slint-build",
+ "windows",
 ]
 
 [[package]]
 name = "fex-core"
 version = "0.1.0"
 dependencies = [
+ "windows",
+]
+
+[[package]]
+name = "fex-shell-host"
+version = "0.1.0"
+dependencies = [
+ "fex-core",
  "windows",
 ]
 

@@ -8,6 +8,11 @@ license.workspace = true
 fex-core = { path = "../core" }
 raw-window-handle = "0.6"
 slint = { version = "1", features = ["raw-window-handle-06"] }
+windows = { version = "0.62", features = [
+    "Win32_Foundation",
+    "Win32_Graphics_Gdi",
+    "Win32_UI_WindowsAndMessaging",
+] }
 
 [build-dependencies]
 slint-build = "1"

@@ -10,12 +10,37 @@ use std::sync::atomic::{AtomicU64, Ordering::SeqCst};
 use std::thread;
 use std::time::{Duration, Instant};
 
+use fex_core::menu::{HANG_LIMIT, MenuHost, MenuItem, MenuResult, Request};
 use fex_core::shell::{self, Op};
 use fex_core::{Entry, SortKey, format_filetime, format_size, list_dir, sort_order};
+use popup::{Own, SEP, own};
 use slint::platform::Key;
 use slint::{ComponentHandle, Model, ModelNotify, ModelRc, ModelTracker, SharedString, VecModel};
+use windows::Win32::Foundation::{HWND, POINT};
+use windows::Win32::Graphics::Gdi::ClientToScreen;
+use windows::Win32::UI::WindowsAndMessaging::{AllowSetForegroundWindow, GetCursorPos};
+
+mod popup;
 
 slint::include_modules!();
+
+// Our own context-menu commands (shell items use 1..=0x7FFF).
+const CMD_OPEN: u32 = 0x8001;
+const CMD_OPEN_TAB: u32 = 0x8002;
+const CMD_CUT: u32 = 0x8003;
+const CMD_COPY: u32 = 0x8004;
+const CMD_COPY_PATH: u32 = 0x8005;
+const CMD_RENAME: u32 = 0x8006;
+const CMD_DELETE: u32 = 0x8007;
+const CMD_PROPERTIES: u32 = 0x8008;
+const CMD_PASTE: u32 = 0x8009;
+const CMD_NEW_FOLDER: u32 = 0x800A;
+const CMD_REFRESH: u32 = 0x800B;
+const CMD_MORE: u32 = 0x800C;
+const CMD_RETRY: u32 = 0x800D;
+
+/// How long a right-click waits for a shell menu that isn't prefetched yet.
+const MENU_WAIT: Duration = Duration::from_millis(150);
 
 const SORT_KEYS: [SortKey; 4] = [SortKey::Name, SortKey::Modified, SortKey::Type, SortKey::Size];
 
@@ -178,8 +203,9 @@ impl Tab {
         }
     }
 
+    /// Exact path (from the raw UTF-16 name, not the lossy display string).
     fn path_of(&self, idx: u32) -> PathBuf {
-        self.cwd.borrow().join(self.rows.name(idx))
+        self.cwd.borrow().join(self.rows.entries.borrow()[idx as usize].os_name())
     }
 
     fn title(&self) -> String {
@@ -203,6 +229,13 @@ struct App {
     active: Cell<usize>,
     next_id: Cell<u64>,
     typeahead: RefCell<(String, Option<Instant>)>,
+    /// Shell context menus come from the separate fex-shell-host process.
+    host: Arc<MenuHost>,
+    menu_seq: Cell<u64>,
+    /// The menu last requested from the host: (background?, paths, seq).
+    prefetched: RefCell<Option<(bool, Vec<PathBuf>, u64)>>,
+    /// Waiting for "더 많은 옵션"; no other query may supersede it meanwhile.
+    menu_busy: Cell<bool>,
 }
 
 thread_local! {
@@ -352,6 +385,7 @@ impl App {
             s += &note;
         }
         self.ui().set_status(s.into());
+        self.prefetch_for(t);
     }
 
     fn set_note(&self, t: &Tab, note: String) {
@@ -362,17 +396,14 @@ impl App {
     // ---------- loading ----------
 
     /// Lists `path` on a worker and streams it in. The old listing stays until the first batch
-    /// arrives, so an unreadable folder leaves the tab where it was. A file path is opened instead.
+    /// arrives, so an unreadable folder (or a path that is now a file) leaves the tab where it was.
+    /// Never opens files: only an explicit address-bar entry does that.
     fn navigate(&self, t: &Rc<Tab>, path: PathBuf, hist: Hist, after: Option<After>) {
         let epoch = t.epoch.fetch_add(1, SeqCst) + 1;
         *t.pending.borrow_mut() = Some((path.clone(), hist, after));
         self.set_note(t, "불러오는 중…".into());
         let (id, cancel) = (t.id, t.epoch.clone());
         thread::spawn(move || {
-            if path.is_file() {
-                let r = shell::open(&path);
-                return post(move |a| a.opened(id, epoch, r));
-            }
             let start = Instant::now();
             let res = list_dir(&path, |batch| {
                 if cancel.load(SeqCst) != epoch {
@@ -384,13 +415,6 @@ impl App {
             let took = start.elapsed();
             post(move |a| a.listed(id, epoch, took, res.err()));
         });
-    }
-
-    fn opened(&self, id: u64, epoch: u64, r: io::Result<()>) {
-        let Some(t) = self.current(id, epoch) else { return };
-        t.pending.take();
-        self.sync_view(&t);
-        self.set_note(&t, r.err().map(|e| format!("열 수 없음: {e}")).unwrap_or_default());
     }
 
     /// Makes a pending navigation the tab's current folder.
@@ -656,7 +680,12 @@ impl App {
             _ if !in_list => return false,
 
             // File list.
+            _ if alt && is(Key::Return) => self.properties(),
             _ if is(Key::Return) => self.open_selection(),
+            _ if (shift && is(Key::F10)) || is(Key::Menu) => {
+                let _ = slint::invoke_from_event_loop(|| app(|a| a.keyboard_menu()));
+            }
+            _ if ctrl && shift && ch == 'c' => self.copy_path(),
             _ if is(Key::Backspace) => self.back(),
             _ if ctrl && shift && ch == 'n' => self.new_folder(),
             _ if ctrl && ch == 'a' => {
@@ -774,8 +803,26 @@ impl App {
             s.push('\\'); // "D:" means the drive root here, not D:'s current directory
         }
         let p = t.cwd.borrow().join(s); // absolute input replaces cwd
-        self.navigate(&t, p, Hist::Push, None);
         self.ui().invoke_focus_list();
+        // The user typed this path, so a file is opened; anything else is navigated to.
+        let id = t.id;
+        thread::spawn(move || {
+            if p.is_file() {
+                let r = shell::open(&p);
+                post(move |a| {
+                    if let Some(t) = a.find(id) {
+                        a.sync_view(&t);
+                        a.set_note(&t, r.err().map(|e| format!("열 수 없음: {e}")).unwrap_or_default());
+                    }
+                });
+            } else {
+                post(move |a| {
+                    if let Some(t) = a.find(id) {
+                        a.navigate(&t, p, Hist::Push, None);
+                    }
+                });
+            }
+        });
     }
 
     fn sort(&self, col: usize) {
@@ -785,6 +832,261 @@ impl App {
         t.sort.set((key, cur == key && !desc));
         self.sync_view(&t);
         self.resort(&t);
+    }
+
+    // ---------- context menus ----------
+
+    fn next_seq(&self) -> u64 {
+        self.menu_seq.set(self.menu_seq.get() + 1);
+        self.menu_seq.get()
+    }
+
+    /// Asks the host for a menu unless that same menu is already requested; returns its seq.
+    fn prefetch(&self, background: bool, paths: Vec<PathBuf>) -> Result<u64, String> {
+        if let Some((bg, p, seq)) = &*self.prefetched.borrow()
+            && *bg == background
+            && *p == paths
+        {
+            return Ok(*seq);
+        }
+        let seq = self.next_seq();
+        let req = match background {
+            true => Request::Background { seq, folder: paths[0].clone() },
+            false => Request::Items { seq, paths: paths.clone() },
+        };
+        self.host.send(&req)?;
+        *self.prefetched.borrow_mut() = Some((background, paths, seq));
+        Ok(seq)
+    }
+
+    /// Keeps the shell menu for the selection (or, with nothing selected, the folder) warm.
+    fn prefetch_for(&self, t: &Tab) {
+        let cwd = t.cwd.borrow().clone();
+        if self.menu_busy.get() || cwd.as_os_str().is_empty() {
+            return;
+        }
+        let sel = t.rows.selection();
+        let _ = match sel.len() {
+            0 => self.prefetch(true, vec![cwd]),
+            1..=500 => self.prefetch(false, sel.iter().map(|&i| t.path_of(i)).collect()),
+            _ => return, // huge selections: built on demand ("더 많은 옵션")
+        };
+    }
+
+    /// The mouse usually rests on an item before right-clicking it: start building its menu.
+    fn row_hover(&self, row: usize) {
+        let t = self.tab();
+        if self.menu_busy.get() {
+            return;
+        }
+        if let Some(i) = t.rows.entry(row)
+            && !t.rows.selected.borrow()[i as usize]
+        {
+            let _ = self.prefetch(false, vec![t.path_of(i)]);
+        }
+    }
+
+    fn row_menu(&self, row: usize) {
+        let t = self.tab();
+        let Some(i) = t.rows.entry(row) else { return };
+        if !t.rows.selected.borrow()[i as usize] {
+            t.rows.select_only(Some(i));
+            t.anchor.set(Some(i));
+            t.rows.notify.reset();
+        }
+        t.cursor.set(Some(i));
+        self.update_status(&t);
+        let at = cursor_pos();
+        // Run the menu's modal loop outside the pointer-event handler.
+        let _ = slint::invoke_from_event_loop(move || app(|a| a.context_menu(false, at)));
+    }
+
+    fn blank_pressed(&self, right: bool) {
+        let t = self.tab();
+        t.rows.select_only(None);
+        t.rows.notify.reset();
+        self.update_status(&t);
+        if right {
+            let at = cursor_pos();
+            let _ = slint::invoke_from_event_loop(move || app(|a| a.context_menu(true, at)));
+        }
+    }
+
+    fn keyboard_menu(&self) {
+        let t = self.tab();
+        let background = t.rows.selection().is_empty();
+        let at = self.row_screen_pos(if background { None } else { self.cursor_row(&t) });
+        self.context_menu(background, at);
+    }
+
+    /// Screen point just below `row` (or the list's top-left), for keyboard-opened menus.
+    fn row_screen_pos(&self, row: Option<usize>) -> (i32, i32) {
+        let ui = self.ui();
+        let scale = ui.window().scale_factor();
+        let y = ui.get_list_origin_y()
+            + row.map_or(0.0, |r| ui.get_list_y() + (r as f32 + 1.0) * ui.get_row_height());
+        let mut pt = POINT { x: ((ui.get_list_origin_x() + 40.0) * scale) as i32, y: (y * scale) as i32 };
+        unsafe {
+            let _ = ClientToScreen(HWND(self.hwnd() as _), &mut pt);
+        }
+        (pt.x, pt.y)
+    }
+
+    /// Our own items show at once; the shell's join them if the host has them ready
+    /// (prefetched), else they are one click away under "더 많은 옵션".
+    fn context_menu(&self, background: bool, at: (i32, i32)) {
+        let t = self.tab();
+        let cwd = t.cwd.borrow().clone();
+        let paths = if background { vec![cwd.clone()] } else { self.selected_paths(&t) };
+        if self.menu_busy.get() || paths.is_empty() || cwd.as_os_str().is_empty() {
+            return;
+        }
+        let seq = self.prefetch(background, paths.clone());
+        let shell = seq.as_ref().ok().and_then(|&s| self.host.wait(s, MENU_WAIT));
+
+        let mut top = if background {
+            vec![
+                Own { disabled: !shell::clipboard_has_files(), ..own(CMD_PASTE, "붙여넣기\tCtrl+V") },
+                own(CMD_NEW_FOLDER, "새 폴더\tCtrl+Shift+N"),
+                own(CMD_REFRESH, "새로 고침\tF5"),
+            ]
+        } else {
+            let sel = t.rows.selection();
+            let mut v = vec![Own { default: true, ..own(CMD_OPEN, "열기\tEnter") }];
+            if let [i] = sel[..]
+                && t.rows.is_dir(i)
+            {
+                v.push(own(CMD_OPEN_TAB, "새 탭에서 열기"));
+            }
+            v.extend([
+                SEP,
+                own(CMD_CUT, "잘라내기\tCtrl+X"),
+                own(CMD_COPY, "복사\tCtrl+C"),
+                own(CMD_COPY_PATH, "경로 복사\tCtrl+Shift+C"),
+                SEP,
+                own(CMD_RENAME, "이름 바꾸기\tF2"),
+                own(CMD_DELETE, "삭제\tDel"),
+            ]);
+            v
+        };
+        let items: &[MenuItem] = match &shell {
+            Some(Ok(items)) => items,
+            _ => &[],
+        };
+        match (&seq, &shell) {
+            (Ok(_), Some(Ok(_))) => {}
+            (Ok(_), None) => top.extend([SEP, own(CMD_MORE, "더 많은 옵션…")]),
+            (Ok(_), Some(Err(e))) => {
+                self.set_note(&t, format!("셸 메뉴 실패: {e}"));
+                top.extend([SEP, own(CMD_RETRY, "더 많은 옵션 (다시 시도)…")]);
+            }
+            (Err(e), _) => self.set_note(&t, e.clone()),
+        }
+        let bottom = [own(CMD_PROPERTIES, "속성\tAlt+Enter")];
+
+        match popup::show(self.hwnd(), at, &top, items, &bottom) {
+            0 => {}
+            id @ 1..=0x7FFF => {
+                if let Ok(seq) = seq {
+                    self.invoke_shell(Request::Invoke { seq, id });
+                }
+            }
+            CMD_MORE => self.more_options(background, paths, false, at),
+            CMD_RETRY => self.more_options(background, paths, true, at),
+            CMD_OPEN => self.open_selection(),
+            CMD_OPEN_TAB => self.new_tab(paths[0].clone()),
+            CMD_CUT => self.copy(true),
+            CMD_COPY => self.copy(false),
+            CMD_COPY_PATH => self.copy_path(),
+            CMD_RENAME => self.start_rename(),
+            CMD_DELETE => self.delete(false),
+            CMD_PASTE => self.paste(),
+            CMD_NEW_FOLDER => self.new_folder(),
+            CMD_REFRESH => self.reload(&t, After::default()),
+            CMD_PROPERTIES => self.properties_of(paths),
+            _ => {}
+        }
+    }
+
+    /// Waits (off the UI thread) for the shell menu, then shows it on its own.
+    fn more_options(&self, background: bool, paths: Vec<PathBuf>, retry: bool, at: (i32, i32)) {
+        if retry {
+            self.host.restart();
+            *self.prefetched.borrow_mut() = None;
+        }
+        let seq = match self.prefetch(background, paths) {
+            Ok(seq) => seq,
+            Err(e) => return self.set_note(&self.tab(), e),
+        };
+        self.menu_busy.set(true);
+        self.set_note(&self.tab(), "셸 메뉴 불러오는 중…".into());
+        let host = self.host.clone();
+        thread::spawn(move || {
+            let r = host.wait(seq, HANG_LIMIT);
+            post(move |a| a.show_more(seq, r, at));
+        });
+    }
+
+    fn show_more(&self, seq: u64, r: Option<MenuResult>, at: (i32, i32)) {
+        self.menu_busy.set(false);
+        let t = self.tab();
+        match r {
+            Some(Ok(items)) => {
+                self.set_note(&t, String::new());
+                let id = popup::show(self.hwnd(), at, &[], &items, &[]);
+                if (1..=0x7FFF).contains(&id) {
+                    self.invoke_shell(Request::Invoke { seq, id });
+                }
+            }
+            Some(Err(e)) => self.set_note(&t, format!("셸 메뉴 실패: {e}")),
+            None => {
+                // A shell extension is stuck: replace the host, Fast Explorer carries on.
+                self.host.restart();
+                *self.prefetched.borrow_mut() = None;
+                self.set_note(&t, "셸 메뉴가 응답하지 않아 다시 시작함".into());
+            }
+        }
+    }
+
+    fn invoke_shell(&self, req: Request) {
+        // Let the host bring the windows it opens (Open with, Properties, ...) to the front.
+        if let Some(pid) = self.host.pid() {
+            unsafe {
+                let _ = AllowSetForegroundWindow(pid);
+            }
+        }
+        if let Err(e) = self.host.send(&req) {
+            self.set_note(&self.tab(), e);
+        }
+    }
+
+    /// Alt+Enter: properties of the selection, or of the folder.
+    fn properties(&self) {
+        let t = self.tab();
+        let mut paths = self.selected_paths(&t);
+        if paths.is_empty() {
+            paths.push(t.cwd.borrow().clone());
+        }
+        self.properties_of(paths);
+    }
+
+    fn properties_of(&self, paths: Vec<PathBuf>) {
+        let seq = self.next_seq();
+        self.invoke_shell(Request::Verb { seq, verb: "properties".into(), paths });
+    }
+
+    fn copy_path(&self) {
+        let t = self.tab();
+        let paths = self.selected_paths(&t);
+        if paths.is_empty() {
+            return;
+        }
+        let text = paths.iter().map(|p| format!("\"{}\"", p.display())).collect::<Vec<_>>().join("\r\n");
+        let note = match shell::clipboard_set_text(&text, self.hwnd()) {
+            Ok(()) => format!("경로 {}개 복사함", paths.len()),
+            Err(e) => format!("클립보드 실패: {e}"),
+        };
+        self.set_note(&t, note);
     }
 
     // ---------- file operations ----------
@@ -894,10 +1196,26 @@ impl App {
     }
 }
 
+fn cursor_pos() -> (i32, i32) {
+    let mut pt = POINT::default();
+    unsafe {
+        let _ = GetCursorPos(&mut pt);
+    }
+    (pt.x, pt.y)
+}
+
 fn main() -> Result<(), slint::PlatformError> {
     let ui = AppWindow::new()?;
     let tab_model = Rc::new(VecModel::default());
     ui.set_tabs(ModelRc::from(tab_model.clone()));
+
+    let exe = std::env::current_exe().unwrap_or_default().with_file_name("fex-shell-host.exe");
+    let host = Arc::new(MenuHost::new(exe, |_, r| {
+        if let Err(e) = r {
+            post(move |a| a.set_note(&a.tab(), format!("실행 실패: {e}")));
+        }
+    }));
+    host.warm_up(); // loading shell extensions takes seconds the first time; do it now
 
     APP.with(|a| {
         let _ = a.set(App {
@@ -907,6 +1225,10 @@ fn main() -> Result<(), slint::PlatformError> {
             active: Cell::new(0),
             next_id: Cell::new(0),
             typeahead: RefCell::default(),
+            host,
+            menu_seq: Cell::new(0),
+            prefetched: RefCell::default(),
+            menu_busy: Cell::new(false),
         });
     });
 
@@ -928,6 +1250,9 @@ fn main() -> Result<(), slint::PlatformError> {
         })
     });
     ui.on_rename_done(|text, commit| app(|a| a.rename_done(&text, commit)));
+    ui.on_row_menu(|r| app(|a| a.row_menu(r as usize)));
+    ui.on_row_hover(|r| app(|a| a.row_hover(r as usize)));
+    ui.on_blank_pressed(|right| app(|a| a.blank_pressed(right)));
     ui.on_key(|e, in_list| {
         app(|a| a.key(&e.text, e.modifiers.control, e.modifiers.shift, e.modifiers.alt, in_list))
     });

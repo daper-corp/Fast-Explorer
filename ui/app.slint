@@ -48,7 +48,7 @@ component HeaderCell inherits Rectangle {
 
 export component AppWindow inherits Window {
     in property <string> folder;
-    title: root.folder == "" ? "Fex" : root.folder + " - Fex";
+    title: root.folder == "" ? "Fast Explorer" : root.folder + " - Fast Explorer";
     preferred-width: 1100px;
     preferred-height: 720px;
     background: Palette.background;
@@ -66,6 +66,9 @@ export component AppWindow inherits Window {
     in-out property <length> list-y <=> list.content-y;
     out property <length> list-height: list.visible-height;
     out property <length> row-height: 26px;
+    // Where the list sits in the window, to place keyboard-opened menus.
+    out property <length> list-origin-x: list.absolute-position.x;
+    out property <length> list-origin-y: list.absolute-position.y;
 
     callback navigate(string);
     callback back();
@@ -77,6 +80,9 @@ export component AppWindow inherits Window {
     callback sort(int);
     callback row-pressed(int, KeyboardModifiers);
     callback row-open(int);
+    callback row-menu(int);
+    callback row-hover(int);
+    callback blank-pressed(bool);  // true = right button
     callback rename-done(string, bool);
     // `in-list` is true when the file list has focus; otherwise only global shortcuts apply.
     callback key(KeyEvent, bool) -> bool;
@@ -256,6 +262,17 @@ export component AppWindow inherits Window {
                     root.key(e, true) ? EventResult.accept : EventResult.reject
                 }
 
+                // Clicks that no row takes land here: empty space below the rows.
+                blank-touch := TouchArea {
+                    width: 100%;
+                    height: 100%;
+                    pointer-event(e) => {
+                        if e.kind == PointerEventKind.down && (e.button == PointerEventButton.left || e.button == PointerEventButton.right) {
+                            list-focus.focus();
+                            root.blank-pressed(e.button == PointerEventButton.right);
+                        }
+                    }
+
                 list := ListView {
                     width: 100%;
                     height: 100%;
@@ -269,9 +286,19 @@ export component AppWindow inherits Window {
                                     list-focus.focus();
                                     root.row-pressed(i, e.modifiers);
                                 }
+                                if e.kind == PointerEventKind.down && e.button == PointerEventButton.right {
+                                    list-focus.focus();
+                                    root.row-menu(i);
+                                }
                             }
                             double-clicked => {
                                 root.row-open(i);
+                            }
+                            // Prefetch the shell menu for the item under the mouse.
+                            changed has-hover => {
+                                if self.has-hover {
+                                    root.row-hover(i);
+                                }
                             }
                         }
 
@@ -329,6 +356,7 @@ export component AppWindow inherits Window {
                             }
                         }
                     }
+                }
                 }
             }
 
