@@ -8,10 +8,15 @@ use std::path::{Path, PathBuf};
 
 use windows::Win32::Foundation::{ERROR_ACCESS_DENIED, ERROR_SUCCESS, HANDLE, HGLOBAL, HWND, POINT};
 use windows::Win32::System::Registry::{HKEY_CURRENT_USER, RRF_RT_REG_DWORD, RegGetValueW};
-use windows::Win32::Storage::FileSystem::{MOVE_FILE_FLAGS, MoveFileExW};
+use windows::Win32::Storage::FileSystem::{
+    GetDriveTypeW, GetLogicalDriveStringsW, GetVolumeInformationW, MOVE_FILE_FLAGS, MoveFileExW,
+};
 use windows::Win32::System::Com::{
     CLSCTX_ALL, COINIT_APARTMENTTHREADED, COINIT_DISABLE_OLE1DDE, CoCreateInstance, CoInitializeEx, CoTaskMemFree,
     CoUninitialize,
+};
+use windows::Win32::System::WindowsProgramming::{
+    DRIVE_CDROM, DRIVE_FIXED, DRIVE_NO_ROOT_DIR, DRIVE_RAMDISK, DRIVE_REMOTE, DRIVE_REMOVABLE, DRIVE_UNKNOWN,
 };
 use windows::Win32::System::DataExchange::{
     CloseClipboard, EmptyClipboard, GetClipboardData, IsClipboardFormatAvailable, OpenClipboard,
@@ -20,9 +25,10 @@ use windows::Win32::System::DataExchange::{
 use windows::Win32::System::Memory::{GMEM_MOVEABLE, GlobalAlloc, GlobalLock, GlobalUnlock};
 use windows::Win32::System::Ole::{CF_HDROP, CF_UNICODETEXT};
 use windows::Win32::UI::Shell::{
-    DROPFILES, DragQueryFileW, FOF_ALLOWUNDO, FOLDERID_ProgramFiles, KF_FLAG_DEFAULT, SHGetKnownFolderPath, FOF_NO_UI, FOF_NOCONFIRMMKDIR, FOF_RENAMEONCOLLISION,
-    FOFX_ADDUNDORECORD, FileOperation, HDROP, IFileOperation, IShellItem, SEE_MASK_NOASYNC, SEE_MASK_NOCLOSEPROCESS,
-    SHCreateItemFromParsingName, SHELLEXECUTEINFOW, ShellExecuteExW,
+    DROPFILES, DragQueryFileW, FOF_ALLOWUNDO, FOLDERID_Desktop, FOLDERID_Downloads, FOLDERID_ProgramFiles,
+    FOLDERID_RoamingAppData, KF_FLAG_DEFAULT, SHGetKnownFolderPath, FOF_NO_UI, FOF_NOCONFIRMMKDIR,
+    FOF_RENAMEONCOLLISION, FOFX_ADDUNDORECORD, FileOperation, HDROP, IFileOperation, IShellItem, SEE_MASK_NOASYNC,
+    SEE_MASK_NOCLOSEPROCESS, SHCreateItemFromParsingName, SHELLEXECUTEINFOW, ShellExecuteExW,
 };
 use windows::Win32::System::Threading::{GetExitCodeProcess, INFINITE, WaitForSingleObject};
 use windows::Win32::UI::WindowsAndMessaging::{IDYES, MB_ICONQUESTION, MB_YESNO, MessageBoxW, SW_HIDE, SW_SHOWNORMAL};
@@ -99,14 +105,86 @@ pub fn rename(path: &Path, new_name: &str, owner: Option<isize>) -> io::Result<b
     }
 }
 
-/// The real Program Files folder. Never taken from environment variables, which the user controls.
-pub fn program_files() -> io::Result<PathBuf> {
+/// A Windows-known folder. Never taken from environment variables, which the user controls.
+pub fn known_folder(id: &windows::core::GUID) -> io::Result<PathBuf> {
     unsafe {
-        let p = SHGetKnownFolderPath(&FOLDERID_ProgramFiles, KF_FLAG_DEFAULT, None)?;
+        let p = SHGetKnownFolderPath(id, KF_FLAG_DEFAULT, None)?;
         let path = p.to_string().map_err(io::Error::other);
         CoTaskMemFree(Some(p.0 as _));
         Ok(PathBuf::from(path?))
     }
+}
+
+/// The real Program Files folder. Never taken from environment variables, which the user controls.
+pub fn program_files() -> io::Result<PathBuf> {
+    known_folder(&FOLDERID_ProgramFiles)
+}
+
+pub fn desktop() -> io::Result<PathBuf> {
+    known_folder(&FOLDERID_Desktop)
+}
+
+pub fn downloads() -> io::Result<PathBuf> {
+    known_folder(&FOLDERID_Downloads)
+}
+
+pub fn roaming_appdata() -> io::Result<PathBuf> {
+    known_folder(&FOLDERID_RoamingAppData)
+}
+
+/// One entry under "내 PC".
+pub struct Drive {
+    /// Root including the trailing backslash, e.g. `C:\`.
+    pub path: PathBuf,
+    /// Volume label with the letter, e.g. `로컬 디스크 (C:)`.
+    pub title: String,
+}
+
+/// Every mounted drive that has a root, in the order Windows reports them.
+pub fn drives() -> Vec<Drive> {
+    let mut buf = vec![0u16; 1024];
+    let n = unsafe { GetLogicalDriveStringsW(Some(&mut buf)) } as usize;
+    let n = n.min(buf.len());
+    let mut out = Vec::new();
+    let mut start = 0;
+    while start < n {
+        let Some(len) = buf[start..n].iter().position(|&c| c == 0) else { break };
+        if len == 0 {
+            break;
+        }
+        let root = String::from_utf16_lossy(&buf[start..start + len]);
+        start += len + 1;
+        let wide: Vec<u16> = root.encode_utf16().chain(Some(0)).collect();
+        let kind = unsafe { GetDriveTypeW(PCWSTR(wide.as_ptr())) };
+        if kind == DRIVE_UNKNOWN || kind == DRIVE_NO_ROOT_DIR {
+            continue;
+        }
+        let mut name = [0u16; 128];
+        let label = unsafe {
+            GetVolumeInformationW(PCWSTR(wide.as_ptr()), Some(&mut name), None, None, None, None)
+                .ok()
+                .map(|()| {
+                    let len = name.iter().position(|&c| c == 0).unwrap_or(0);
+                    String::from_utf16_lossy(&name[..len])
+                })
+                .filter(|s| !s.is_empty())
+        };
+        let letter = root.trim_end_matches('\\');
+        let kind_name = match kind {
+            DRIVE_REMOVABLE => "이동식 디스크",
+            DRIVE_FIXED => "로컬 디스크",
+            DRIVE_REMOTE => "네트워크 드라이브",
+            DRIVE_CDROM => "CD 드라이브",
+            DRIVE_RAMDISK => "RAM 디스크",
+            _ => "드라이브",
+        };
+        let title = match label {
+            Some(l) => format!("{l} ({letter})"),
+            None => format!("{kind_name} ({letter})"),
+        };
+        out.push(Drive { path: PathBuf::from(root), title });
+    }
+    out
 }
 
 /// Where the index service is installed (admin-only writable).
@@ -364,5 +442,13 @@ mod tests {
         assert!(run(&Op::Delete { paths: vec![b.clone()], permanent: true }, None).unwrap());
         assert!(!b.exists());
         fs::remove_dir_all(&root).unwrap();
+    }
+
+    #[test]
+    fn lists_drives() {
+        let drives = drives();
+        assert!(!drives.is_empty());
+        assert!(drives.iter().all(|d| d.path.is_absolute() && !d.title.is_empty()));
+        assert!(drives.iter().any(|d| d.path.to_string_lossy().starts_with('C')));
     }
 }

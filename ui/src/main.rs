@@ -3,7 +3,7 @@
 use std::cell::{Cell, OnceCell, RefCell};
 use std::collections::{HashMap, HashSet};
 use std::io;
-use std::path::PathBuf;
+use std::path::{Path, PathBuf};
 use std::rc::Rc;
 use std::sync::{Arc, mpsc};
 use std::sync::atomic::{AtomicBool, AtomicU64, Ordering::Relaxed, Ordering::SeqCst};
@@ -15,14 +15,28 @@ use fex_core::icons::{self, IconKey};
 use fex_core::index::{self, QueryError, Results};
 use fex_core::menu::{HANG_LIMIT, MenuHost, MenuItem, MenuResult, Request};
 use fex_core::shell::{self, Op};
+use fex_core::watch;
 use fex_core::{Entry, SortKey, format_filetime, format_size, list_dir, sort_order};
 use popup::{Own, SEP, own};
-use slint::platform::Key;
+use slint::platform::{Key, PointerEventButton, WindowEvent};
 use slint::{ComponentHandle, Model, ModelNotify, ModelRc, ModelTracker, Rgba8Pixel, SharedPixelBuffer, SharedString, VecModel};
-use windows::Win32::Foundation::{HWND, POINT};
-use windows::Win32::Graphics::Gdi::ClientToScreen;
-use windows::Win32::UI::WindowsAndMessaging::{AllowSetForegroundWindow, GetCursorPos};
+use windows::Win32::Foundation::{HWND, LPARAM, LRESULT, POINT, RECT, WPARAM};
+use windows::Win32::Graphics::Dwm::{
+    DWMWA_WINDOW_CORNER_PREFERENCE, DWMWCP_DONOTROUND, DwmExtendFrameIntoClientArea, DwmSetWindowAttribute,
+};
+use windows::Win32::Graphics::Gdi::{
+    ClientToScreen, GetMonitorInfoW, MONITORINFO, MONITOR_DEFAULTTONEAREST, MonitorFromWindow, ScreenToClient,
+};
+use windows::Win32::UI::Controls::MARGINS;
+use windows::Win32::UI::Input::KeyboardAndMouse::{GetAsyncKeyState, VK_LBUTTON};
+use windows::Win32::UI::Shell::{DefSubclassProc, SetWindowSubclass};
+use windows::Win32::UI::WindowsAndMessaging::{
+    AllowSetForegroundWindow, GetCursorPos, GetWindowRect, HTBOTTOM, HTBOTTOMLEFT, HTBOTTOMRIGHT, HTLEFT, HTRIGHT,
+    HTTOP, HTTOPLEFT, HTTOPRIGHT, IsZoomed, PostMessageW, WM_CLOSE, WM_NCHITTEST, WM_SIZE, WM_XBUTTONDOWN,
+    WM_XBUTTONUP, XBUTTON1, XBUTTON2,
+};
 
+mod dnd;
 mod popup;
 
 slint::include_modules!();
@@ -42,6 +56,7 @@ const CMD_REFRESH: u32 = 0x800B;
 const CMD_MORE: u32 = 0x800C;
 const CMD_RETRY: u32 = 0x800D;
 const CMD_NEW_FILE: u32 = 0x800E;
+const CMD_ADD_FAVORITE: u32 = 0x800F;
 
 /// How long a right-click waits for a shell menu that isn't prefetched yet.
 const MENU_WAIT: Duration = Duration::from_millis(150);
@@ -227,6 +242,8 @@ enum Hist {
 struct After {
     select: Vec<String>,
     rename: bool,
+    /// The listing came from the folder watcher, not from the user.
+    auto: bool,
 }
 
 struct Tab {
@@ -250,6 +267,10 @@ struct Tab {
     scroll: Cell<f32>,
     /// Showing search results instead of the folder: (query, path of each entry).
     search: RefCell<Option<(String, Vec<PathBuf>)>>,
+    /// Reports changes made to the folder by other programs.
+    watch: RefCell<Option<watch::DirWatch>>,
+    /// A watcher-triggered refresh is scheduled; further events join it.
+    refresh_due: Cell<bool>,
 }
 
 impl Tab {
@@ -271,6 +292,8 @@ impl Tab {
             note: RefCell::default(),
             scroll: Cell::new(0.0),
             search: RefCell::default(),
+            watch: RefCell::new(watch::DirWatch::new(move || post(move |a| a.folder_changed(id))).ok()),
+            refresh_due: Cell::new(false),
         }
     }
 
@@ -317,6 +340,19 @@ struct App {
     /// The newest search; workers for older ones stop and their results are dropped.
     search_seq: Arc<AtomicU64>,
     install_offered: Cell<bool>,
+    /// Sidebar: user folders, the default locations, and the mounted drives.
+    favorites: RefCell<Vec<PathBuf>>,
+    desktop: Option<PathBuf>,
+    downloads: Option<PathBuf>,
+    drives: Vec<shell::Drive>,
+    /// A left press may turn into a drag; cleared when the drag starts.
+    drag_armed: Cell<bool>,
+    /// Pressing an already-selected row keeps the selection until release, so it can be dragged.
+    pending_collapse: Cell<Option<u32>>,
+    /// Selection to build the rubber-band range on (empty unless Ctrl is held).
+    rubber_base: RefCell<Vec<bool>>,
+    rubber_last: Cell<(usize, usize)>,
+    drop_row: Cell<i32>,
 }
 
 thread_local! {
@@ -366,6 +402,20 @@ impl App {
         }
     }
 
+    fn minimize_window(&self) {
+        self.ui().window().set_minimized(true);
+    }
+
+    fn toggle_maximize(&self) {
+        let ui = self.ui();
+        let window = ui.window();
+        window.set_maximized(!window.is_maximized());
+    }
+
+    fn close_window(&self) {
+        let _ = unsafe { PostMessageW(Some(HWND(self.hwnd() as _)), WM_CLOSE, WPARAM(0), LPARAM(0)) };
+    }
+
     // ---------- tabs ----------
 
     fn new_tab(&self, path: PathBuf) {
@@ -404,7 +454,7 @@ impl App {
             return;
         }
         if n == 1 {
-            let _ = self.ui().hide();
+            let _ = slint::quit_event_loop();
             return;
         }
         let closed = self.tabs.borrow_mut().remove(i);
@@ -450,13 +500,97 @@ impl App {
         ui.set_search_mode(query.is_some());
         ui.set_search_text(query.unwrap_or_default().into());
         self.sync_tabs();
+        self.sync_places();
         self.update_status(t);
     }
 
-    fn update_status(&self, t: &Tab) {
-        if !self.is_active(t) {
+    // ---------- sidebar ----------
+
+    /// Rebuilds the sidebar models; cheap, and it picks up icons as they load.
+    fn sync_places(&self) {
+        let Some(ui) = self.ui.upgrade() else { return };
+        let cwd = self.tab().cwd.borrow().clone();
+        let favorites: Vec<Place> = self.favorites.borrow().iter().map(|p| self.place(p, &cwd, true)).collect();
+        let drives: Vec<Place> =
+            self.drives.iter().map(|d| self.place_drive(d, &cwd)).collect();
+        ui.set_favorites(ModelRc::from(Rc::new(VecModel::from(favorites))));
+        ui.set_drives(ModelRc::from(Rc::new(VecModel::from(drives))));
+    }
+
+    fn place(&self, path: &Path, cwd: &Path, removable: bool) -> Place {
+        let title = match () {
+            _ if self.desktop.as_deref().is_some_and(|d| same_path(d, path)) => "바탕 화면".into(),
+            _ if self.downloads.as_deref().is_some_and(|d| same_path(d, path)) => "다운로드".into(),
+            _ => path
+                .file_name()
+                .map(|n| n.to_string_lossy().into_owned())
+                .filter(|n| !n.is_empty())
+                .unwrap_or_else(|| path.display().to_string()),
+        };
+        Place {
+            title: SharedString::from(title),
+            path: path.display().to_string().into(),
+            active: same_path(path, cwd),
+            removable,
+            icon: icon_image(IconKey::File(path.to_path_buf())),
+        }
+    }
+
+    fn place_drive(&self, drive: &shell::Drive, cwd: &Path) -> Place {
+        Place {
+            title: drive.title.clone().into(),
+            path: drive.path.display().to_string().into(),
+            active: same_path(&drive.path, cwd),
+            removable: false,
+            icon: icon_image(IconKey::File(drive.path.clone())),
+        }
+    }
+
+    fn open_place(&self, path: &str) {
+        let t = self.tab();
+        let path = PathBuf::from(path);
+        // Clicking the folder already shown is a no-op, unless search results hide it.
+        if same_path(&t.cwd.borrow(), &path) && t.search.borrow().is_none() {
             return;
         }
+        self.navigate(&t, path, Hist::Push, None);
+        self.ui().invoke_focus_list();
+    }
+
+    fn add_favorite(&self) {
+        let cwd = self.tab().cwd.borrow().clone();
+        self.add_favorite_path(cwd);
+    }
+
+    fn add_favorite_path(&self, path: PathBuf) {
+        let t = self.tab();
+        if path.as_os_str().is_empty() {
+            return;
+        }
+        {
+            let mut favorites = self.favorites.borrow_mut();
+            if favorites.iter().any(|p| same_path(p, &path)) {
+                drop(favorites);
+                return self.set_note(&t, "이미 즐겨찾기에 있음".into());
+            }
+            favorites.push(path);
+            save_favorites(&favorites);
+        }
+        self.sync_places();
+        self.set_note(&t, "즐겨찾기에 추가함".into());
+    }
+
+    fn remove_favorite(&self, path: &str) {
+        let path = PathBuf::from(path);
+        let mut favorites = self.favorites.borrow_mut();
+        let Some(i) = favorites.iter().position(|p| same_path(p, &path)) else { return };
+        favorites.remove(i);
+        save_favorites(&favorites);
+        drop(favorites);
+        self.sync_places();
+    }
+
+    fn status_text(&self, t: &Tab) -> String {
         let n = t.rows.len();
         let sel = t.rows.selected.borrow().iter().filter(|&&s| s).count();
         let mut s = format!("{n}개 항목");
@@ -468,8 +602,23 @@ impl App {
             s += " · ";
             s += &note;
         }
-        self.ui().set_status(s.into());
+        s
+    }
+
+    fn update_status(&self, t: &Tab) {
+        if !self.is_active(t) {
+            return;
+        }
+        self.ui().set_status(self.status_text(t).into());
         self.prefetch_for(t);
+    }
+
+    /// Status-only refresh: used while dragging a selection rectangle, where rebuilding the
+    /// shell menu for every mouse move would be wasteful.
+    fn update_status_text(&self, t: &Tab) {
+        if self.is_active(t) {
+            self.ui().set_status(self.status_text(t).into());
+        }
     }
 
     fn set_note(&self, t: &Tab, note: String) {
@@ -484,6 +633,7 @@ impl App {
     /// Never opens files: only an explicit address-bar entry does that.
     fn navigate(&self, t: &Rc<Tab>, path: PathBuf, hist: Hist, after: Option<After>) {
         let epoch = t.epoch.fetch_add(1, SeqCst) + 1;
+        t.refresh_due.set(false);
         *t.pending.borrow_mut() = Some((path.clone(), hist, after));
         self.set_note(t, "불러오는 중…".into());
         let (id, cancel) = (t.id, t.epoch.clone());
@@ -524,6 +674,9 @@ impl App {
             }
         }
         *t.rows.base.borrow_mut() = path.clone();
+        if let Some(w) = t.watch.borrow().as_ref() {
+            w.watch(path.clone());
+        }
         *t.cwd.borrow_mut() = path;
         if self.is_active(t) {
             self.ui().set_list_y(0.0);
@@ -629,6 +782,7 @@ impl App {
 
     fn reloaded(&self, id: u64, epoch: u64, all: Vec<Entry>, order: Vec<u32>, took: Duration, err: Option<io::Error>) {
         let Some(t) = self.current(id, epoch) else { return };
+        let auto = t.after.borrow().as_ref().is_some_and(|a| a.auto);
         if let Some(e) = err {
             return self.set_note(&t, format!("새로 고칠 수 없음: {e}"));
         }
@@ -643,6 +797,10 @@ impl App {
         self.apply_after(&t);
         t.rows.notify.reset();
         self.reveal_cursor(&t);
+        let quiet = !t.note.borrow().is_empty();
+        if auto && !quiet {
+            *t.note.borrow_mut() = "변경 감지 · 자동 새로 고침".into();
+        }
         self.update_status(&t);
     }
 
@@ -692,11 +850,19 @@ impl App {
     fn row_pressed(&self, row: usize, ctrl: bool, shift: bool) {
         let t = self.tab();
         let Some(idx) = t.rows.entry(row) else { return };
+        self.drag_armed.set(true);
+        self.pending_collapse.set(None);
+        let multi = t.rows.selected.borrow().iter().filter(|&&s| s).count() > 1;
         if shift {
             let anchor = t.anchor.get().and_then(|a| t.rows.row_of(a)).unwrap_or(row);
             t.rows.select_range(anchor, row, ctrl);
         } else if ctrl {
             t.rows.toggle(idx);
+            t.anchor.set(Some(idx));
+        } else if multi && t.rows.selected.borrow()[idx as usize] {
+            // Keep the selection so the whole group can be dragged; collapse on release
+            // if this turns out to be a plain click.
+            self.pending_collapse.set(Some(idx));
             t.anchor.set(Some(idx));
         } else {
             t.rows.select_only(Some(idx));
@@ -704,6 +870,160 @@ impl App {
         }
         t.cursor.set(Some(idx));
         self.update_status(&t);
+    }
+
+    /// A plain click on a row that was part of a multi-selection collapses the selection.
+    fn row_clicked(&self, row: usize) {
+        self.drag_armed.set(false);
+        let t = self.tab();
+        let Some(idx) = t.rows.entry(row) else { return };
+        if self.pending_collapse.replace(None) == Some(idx) {
+            t.rows.select_only(Some(idx));
+            t.cursor.set(Some(idx));
+            self.update_status(&t);
+        }
+    }
+
+    /// Wheel (middle) click: open the folder in a new tab, like the context menu command.
+    fn row_middle(&self, row: usize) {
+        let t = self.tab();
+        let Some(i) = t.rows.entry(row) else { return };
+        if t.rows.is_dir(i) {
+            self.new_tab(t.path_of(i));
+        }
+    }
+
+    /// Left press moved far enough: hand the selection to OLE as a native drag.
+    fn row_drag(&self, row: usize) {
+        if !self.drag_armed.replace(false) {
+            return;
+        }
+        // `moved` also fires while another mouse button is held; only a left drag counts.
+        if unsafe { GetAsyncKeyState(VK_LBUTTON.0 as i32) } as u16 & 0x8000 == 0 {
+            return;
+        }
+        let t = self.tab();
+        let Some(idx) = t.rows.entry(row) else { return };
+        if t.rows.editing.get().is_some() {
+            return;
+        }
+        self.pending_collapse.set(None);
+        let sel = t.rows.selection();
+        let rows = if sel.contains(&idx) { sel } else { vec![idx] };
+        let paths: Vec<PathBuf> = rows.into_iter().map(|i| t.path_of(i)).collect();
+        // DoDragDrop runs its own modal loop; start it once the pointer event is done.
+        let id = t.id;
+        slint::Timer::single_shot(Duration::ZERO, move || {
+            if let Some(moved) = dnd::start_drag(paths) {
+                // OLE consumes the mouse release that ended the drag; tell the widgets the
+                // button is up so the row does not stay stuck in its pressed state.
+                app(|a| a.end_drag_pointer());
+                if moved {
+                    // A MOVE finished: the source folder changed (an external target), or the
+                    // drop handler is about to refresh it for an internal one.
+                    slint::Timer::single_shot(Duration::from_millis(300), move || post(move |a| a.reload_tab(id)));
+                }
+            }
+        });
+    }
+
+    /// Releases the left button in Slint's eyes after DoDragDrop ate the real mouse-up.
+    fn end_drag_pointer(&self) {
+        let ui = self.ui();
+        let mut pt = POINT::default();
+        unsafe {
+            let _ = GetCursorPos(&mut pt);
+            let _ = ScreenToClient(HWND(self.hwnd() as _), &mut pt);
+        }
+        let scale = ui.window().scale_factor();
+        let position = slint::LogicalPosition::new(pt.x as f32 / scale, pt.y as f32 / scale);
+        ui.window().dispatch_event(WindowEvent::PointerReleased { position, button: PointerEventButton::Left });
+    }
+
+    fn rubber_start(&self, ctrl: bool) {
+        let t = self.tab();
+        *self.rubber_base.borrow_mut() = if ctrl { t.rows.selected.borrow().clone() } else { Vec::new() };
+        self.rubber_last.set((usize::MAX, 0));
+    }
+
+    /// Selects the rows the rubber band covers. `y1`/`y2` are in list-local pixels.
+    fn rubber_move(&self, y1: f32, y2: f32) {
+        let t = self.tab();
+        let n = t.rows.len();
+        if n == 0 {
+            return;
+        }
+        let ui = self.ui();
+        let h = ui.get_row_height().max(1.0);
+        // y is visible; list-y is the content offset (negative when scrolled down).
+        let offset = ui.get_list_y();
+        let a = ((y1.min(y2) - offset) / h).floor().max(0.0) as usize;
+        let b = (((y1.max(y2) - offset) / h).floor().max(0.0) as usize).min(n - 1);
+        let empty = a > b || a >= n;
+        let key = if empty { (usize::MAX, usize::MAX) } else { (a, b) };
+        if self.rubber_last.replace(key) == key {
+            return;
+        }
+        let base = self.rubber_base.borrow();
+        let mut want = vec![false; n];
+        if base.len() == n {
+            want.copy_from_slice(&base);
+        }
+        if !empty {
+            for r in a..=b {
+                if let Some(i) = t.rows.entry(r) {
+                    want[i as usize] = true;
+                }
+            }
+        }
+        t.rows.update_selection(|sel| *sel = want);
+        self.update_status_text(&t);
+    }
+
+    fn rubber_end(&self) {
+        self.rubber_base.borrow_mut().clear();
+        self.rubber_last.set((usize::MAX, 0));
+        let t = self.tab();
+        self.update_status(&t);
+    }
+
+    fn reload_tab(&self, id: u64) {
+        if let Some(t) = self.find(id) {
+            self.reload(&t, After::default());
+        }
+    }
+
+    /// F5 or the tool button: re-list the folder (or re-run the search).
+    fn refresh(&self) {
+        let t = self.tab();
+        self.reload(&t, After::default());
+    }
+
+    /// The watcher saw a change: let a burst settle, then re-list once.
+    fn folder_changed(&self, id: u64) {
+        let Some(t) = self.find(id) else { return };
+        if t.refresh_due.replace(true) {
+            return;
+        }
+        slint::Timer::single_shot(Duration::from_millis(400), move || post(move |a| a.flush_refresh(id)));
+    }
+
+    fn flush_refresh(&self, id: u64) {
+        let Some(t) = self.find(id) else { return };
+        if !t.refresh_due.replace(false) {
+            return;
+        }
+        // Don't pull the list out from under a rename box; check again shortly.
+        if t.rows.editing.get().is_some() {
+            t.refresh_due.set(true);
+            slint::Timer::single_shot(Duration::from_secs(1), move || post(move |a| a.flush_refresh(id)));
+            return;
+        }
+        // A navigation or search already in flight brings its own contents.
+        if t.search.borrow().is_some() || t.pending.borrow().is_some() {
+            return;
+        }
+        self.reload(&t, After { auto: true, ..Default::default() });
     }
 
     fn move_cursor(&self, t: &Tab, row: usize, shift: bool, ctrl: bool) {
@@ -887,7 +1207,7 @@ impl App {
         let t = self.tab();
         let cwd = t.cwd.borrow().clone();
         if let (Some(parent), Some(name)) = (cwd.parent(), cwd.file_name()) {
-            let after = After { select: vec![name.to_string_lossy().into_owned()], rename: false };
+            let after = After { select: vec![name.to_string_lossy().into_owned()], ..Default::default() };
             self.navigate(&t, parent.to_path_buf(), Hist::Push, Some(after));
         }
     }
@@ -1222,7 +1542,7 @@ impl App {
     /// The mouse usually rests on an item before right-clicking it: start building its menu.
     fn row_hover(&self, row: usize) {
         let t = self.tab();
-        if self.menu_busy.get() {
+        if self.menu_busy.get() || self.ui().get_rubber_on() {
             return;
         }
         if let Some(i) = t.rows.entry(row)
@@ -1234,6 +1554,8 @@ impl App {
 
     fn row_menu(&self, row: usize) {
         let t = self.tab();
+        self.drag_armed.set(false);
+        self.pending_collapse.set(None);
         let Some(i) = t.rows.entry(row) else { return };
         if !t.rows.selected.borrow()[i as usize] {
             t.rows.select_only(Some(i));
@@ -1246,10 +1568,14 @@ impl App {
         let _ = slint::invoke_from_event_loop(move || app(|a| a.context_menu(false, at)));
     }
 
-    fn blank_pressed(&self, right: bool) {
+    fn blank_pressed(&self, right: bool, ctrl: bool) {
         let t = self.tab();
-        t.rows.select_only(None);
-        self.update_status(&t);
+        self.drag_armed.set(false);
+        self.pending_collapse.set(None);
+        if right || !ctrl {
+            t.rows.select_only(None);
+            self.update_status(&t);
+        }
         if right {
             let at = cursor_pos();
             let _ = slint::invoke_from_event_loop(move || app(|a| a.context_menu(true, at)));
@@ -1294,6 +1620,8 @@ impl App {
                 own(CMD_NEW_FOLDER, "새 폴더\tCtrl+Shift+N"),
                 own(CMD_NEW_FILE, "새 텍스트 문서"),
                 own(CMD_REFRESH, "새로 고침\tF5"),
+                SEP,
+                own(CMD_ADD_FAVORITE, "즐겨찾기에 추가"),
             ]
         } else {
             let sel = t.rows.selection();
@@ -1302,6 +1630,7 @@ impl App {
                 && t.rows.is_dir(i)
             {
                 v.push(own(CMD_OPEN_TAB, "새 탭에서 열기"));
+                v.push(own(CMD_ADD_FAVORITE, "즐겨찾기에 추가"));
             }
             v.extend([
                 SEP,
@@ -1349,6 +1678,11 @@ impl App {
             CMD_NEW_FOLDER => self.new_folder(),
             CMD_NEW_FILE => self.new_file(),
             CMD_REFRESH => self.reload(&t, After::default()),
+            CMD_ADD_FAVORITE => {
+                if let Some(p) = paths.first() {
+                    self.add_favorite_path(p.clone());
+                }
+            }
             CMD_PROPERTIES => self.properties_of(paths),
             _ => {}
         }
@@ -1468,7 +1802,7 @@ impl App {
         let names = src.iter().filter_map(|p| p.file_name()).map(|n| n.to_string_lossy().into_owned()).collect();
         let dst = t.cwd.borrow().clone();
         let op = if cut { Op::Move(src, dst) } else { Op::Copy(src, dst) };
-        self.run_op(&t, After { select: names, rename: false }, move |hwnd| {
+        self.run_op(&t, After { select: names, ..Default::default() }, move |hwnd| {
             let r = shell::run(&op, Some(hwnd));
             if cut && matches!(r, Ok(true)) {
                 shell::clipboard_clear(hwnd);
@@ -1508,7 +1842,7 @@ impl App {
         }
         if commit && !new.is_empty() && new != old {
             let path = t.path_of(idx);
-            let after = After { select: vec![new.clone()], rename: false };
+            let after = After { select: vec![new.clone()], ..Default::default() };
             self.run_op(&t, after, move |hwnd| shell::rename(&path, &new, Some(hwnd)));
         }
     }
@@ -1534,7 +1868,7 @@ impl App {
             post(move |a| {
                 let Some(t) = a.find(id) else { return };
                 match r {
-                    Ok(name) => a.reload(&t, After { select: vec![name], rename: true }),
+                    Ok(name) => a.reload(&t, After { select: vec![name], rename: true, ..Default::default() }),
                     Err(e) => a.set_note(&t, format!("만들 수 없음: {e}")),
                 }
             });
@@ -1575,6 +1909,64 @@ impl App {
         for r in first..last {
             t.rows.notify.row_changed(r);
         }
+        self.sync_places();
+    }
+
+    // ---------- drag and drop ----------
+
+    /// The folder a drop at screen `(x, y)` lands in: a folder row, else the current folder.
+    fn drop_target_at(&self, x: i32, y: i32) -> Option<(PathBuf, Option<usize>)> {
+        let ui = self.ui();
+        let scale = ui.window().scale_factor();
+        // OLE reports screen pixels; the list's absolute-position is client-relative logical px.
+        let mut pt = POINT { x, y };
+        unsafe {
+            let _ = ScreenToClient(HWND(self.hwnd() as _), &mut pt);
+        }
+        let (x, y) = (pt.x as f32 / scale, pt.y as f32 / scale);
+        let (ox, oy) = (ui.get_list_origin_x(), ui.get_list_origin_y());
+        if x < ox || y < oy || x > ox + ui.get_list_width() || y > oy + ui.get_list_height() {
+            return None;
+        }
+        let t = self.tab();
+        let row = ((y - oy - ui.get_list_y()) / ui.get_row_height().max(1.0)).floor();
+        if row >= 0.0
+            && let Some(i) = t.rows.entry(row as usize)
+            && t.rows.is_dir(i)
+        {
+            return Some((t.path_of(i), Some(row as usize)));
+        }
+        let cwd = t.cwd.borrow().clone();
+        (!cwd.as_os_str().is_empty()).then_some((cwd, None))
+    }
+
+    fn set_drop_row(&self, row: Option<usize>) {
+        let row = row.map_or(-1, |r| r as i32);
+        if self.drop_row.replace(row) != row {
+            self.ui().set_drop_row(row);
+        }
+    }
+
+    /// Runs a native drop on a worker (it can show progress/conflict dialogs), then refreshes.
+    fn drop_files(&self, files: Vec<PathBuf>, target: PathBuf, move_: bool) {
+        let t = self.tab();
+        let id = t.id;
+        let hwnd = self.hwnd();
+        let op = if move_ { Op::Move(files, target) } else { Op::Copy(files, target) };
+        thread::spawn(move || {
+            let r = shell::run(&op, Some(hwnd));
+            let note = match &r {
+                Ok(true) => String::new(),
+                Ok(false) => "취소됨".into(),
+                Err(e) => format!("실패: {e}"),
+            };
+            post(move |a| {
+                if let Some(t) = a.find(id) {
+                    a.set_note(&t, note);
+                    a.reload(&t, After::default());
+                }
+            });
+        });
     }
 
     /// Runs a file operation on a worker (it may show dialogs), then refreshes the tab.
@@ -1671,6 +2063,178 @@ fn cursor_pos() -> (i32, i32) {
     (pt.x, pt.y)
 }
 
+/// Compares paths case-insensitively, ignoring a trailing separator.
+fn same_path(a: &Path, b: &Path) -> bool {
+    let norm = |p: &Path| p.to_string_lossy().trim_end_matches(|c| c == '\\' || c == '/').to_lowercase();
+    norm(a) == norm(b)
+}
+
+fn favorites_file() -> Option<PathBuf> {
+    shell::roaming_appdata().ok().map(|d| d.join("Fast Explorer").join("favorites.txt"))
+}
+
+fn load_favorites(desktop: Option<&Path>, downloads: Option<&Path>) -> Vec<PathBuf> {
+    if let Some(file) = favorites_file()
+        && let Ok(text) = std::fs::read_to_string(&file)
+    {
+        return text.lines().map(str::trim).filter(|l| !l.is_empty()).map(PathBuf::from).collect();
+    }
+    [desktop, downloads].into_iter().flatten().map(Path::to_path_buf).collect()
+}
+
+fn save_favorites(favorites: &[PathBuf]) {
+    let Some(file) = favorites_file() else { return };
+    if let Some(dir) = file.parent() {
+        let _ = std::fs::create_dir_all(dir);
+    }
+    let text = favorites.iter().map(|p| p.display().to_string()).collect::<Vec<_>>().join("\r\n");
+    let _ = std::fs::write(file, text);
+}
+
+/// Maximized state of the last DWM frame update.
+static FRAME_MAXIMIZED: AtomicBool = AtomicBool::new(false);
+
+/// A no-frame window loses the DWM border and drop shadow. Extending the frame by one
+/// pixel restores both without covering the client area; a maximized window must drop
+/// the extended frame or a strip of desktop shows along the screen edges.
+fn apply_window_frame(hwnd: HWND) {
+    unsafe {
+        // Slint draws the visible 1px frame; keep the native corners square so it is
+        // not clipped at the corners on Windows 11.
+        let preference = DWMWCP_DONOTROUND.0;
+        let _ = DwmSetWindowAttribute(
+            hwnd,
+            DWMWA_WINDOW_CORNER_PREFERENCE,
+            &preference as *const i32 as *const _,
+            size_of::<i32>() as u32,
+        );
+        let maximized = IsZoomed(hwnd).as_bool();
+        FRAME_MAXIMIZED.store(maximized, Relaxed);
+        let margins = if maximized {
+            MARGINS::default()
+        } else {
+            MARGINS { cxLeftWidth: 1, cxRightWidth: 1, cyTopHeight: 1, cyBottomHeight: 1 }
+        };
+        let _ = DwmExtendFrameIntoClientArea(hwnd, &margins);
+    }
+}
+
+/// The mouse's back/forward buttons reach the window before any widget sees them.
+fn install_history_buttons(hwnd: isize) {
+    unsafe {
+        let _ = SetWindowSubclass(HWND(hwnd as _), Some(history_subclass), 1, 0);
+    }
+}
+
+unsafe extern "system" fn history_subclass(
+    hwnd: HWND,
+    msg: u32,
+    wparam: WPARAM,
+    lparam: LPARAM,
+    _id: usize,
+    _data: usize,
+) -> LRESULT {
+    if msg == WM_NCHITTEST
+        && let Some(code) = resize_hit(hwnd, lparam)
+    {
+        return LRESULT(code as isize);
+    }
+    if msg == WM_SIZE && FRAME_MAXIMIZED.load(Relaxed) != unsafe { IsZoomed(hwnd) }.as_bool() {
+        apply_window_frame(hwnd);
+    }
+    if msg == WM_XBUTTONDOWN {
+        let button = ((wparam.0 >> 16) & 0xffff) as u16;
+        if button == XBUTTON1 || button == XBUTTON2 {
+            let back = button == XBUTTON1;
+            post(move |a| if back { a.back() } else { a.forward() });
+            return LRESULT(0);
+        }
+    }
+    if msg == WM_XBUTTONUP {
+        return LRESULT(0);
+    }
+    unsafe { DefSubclassProc(hwnd, msg, wparam, lparam) }
+}
+
+/// A frameless window has no resize border; give the outer few pixels back to the OS.
+fn resize_hit(hwnd: HWND, lparam: LPARAM) -> Option<u32> {
+    if unsafe { IsZoomed(hwnd) }.as_bool() {
+        return None;
+    }
+    let mut rect = RECT::default();
+    if unsafe { GetWindowRect(hwnd, &mut rect) }.is_err() {
+        return None;
+    }
+    let x = (lparam.0 as u32 & 0xffff) as u16 as i16 as i32;
+    let y = ((lparam.0 as u32 >> 16) & 0xffff) as u16 as i16 as i32;
+    const B: i32 = 6;
+    let (left, right) = (x < rect.left + B, x >= rect.right - B);
+    let (top, bottom) = (y < rect.top + B, y >= rect.bottom - B);
+    match (left, right, top, bottom) {
+        (true, _, true, _) => Some(HTTOPLEFT),
+        (_, true, true, _) => Some(HTTOPRIGHT),
+        (true, _, _, true) => Some(HTBOTTOMLEFT),
+        (_, true, _, true) => Some(HTBOTTOMRIGHT),
+        (true, _, _, _) => Some(HTLEFT),
+        (_, true, _, _) => Some(HTRIGHT),
+        (_, _, true, _) => Some(HTTOP),
+        (_, _, _, true) => Some(HTBOTTOM),
+        _ => None,
+    }
+}
+
+/// Shrinks and centers the frameless window when its preferred size doesn't fit the monitor.
+fn fit_window_to_screen(ui: &AppWindow, hwnd: HWND) {
+    let mut info = MONITORINFO { cbSize: size_of::<MONITORINFO>() as u32, ..Default::default() };
+    let monitor = unsafe { MonitorFromWindow(hwnd, MONITOR_DEFAULTTONEAREST) };
+    if !unsafe { GetMonitorInfoW(monitor, &mut info) }.as_bool() {
+        return;
+    }
+    let work = info.rcWork;
+    let (avail_w, avail_h) = (work.right - work.left, work.bottom - work.top);
+    let window = ui.window();
+    let size = window.size();
+    let (max_w, max_h) = ((avail_w - 24).max(1), (avail_h - 24).max(1));
+    if size.width as i32 <= max_w && size.height as i32 <= max_h {
+        return;
+    }
+    let w = (size.width as i32).min(max_w).max(1);
+    let h = (size.height as i32).min(max_h).max(1);
+    window.set_size(slint::PhysicalSize::new(w as u32, h as u32));
+    window.set_position(slint::PhysicalPosition::new(
+        work.left + (avail_w - w) / 2,
+        work.top + (avail_h - h) / 2,
+    ));
+}
+
+/// Registers the OLE drop target and XBUTTON handling once the native window exists.
+fn install_native_hooks(weak: slint::Weak<AppWindow>, tries: u32) {
+    slint::Timer::single_shot(Duration::from_millis(if tries == 0 { 0 } else { 50 }), move || {
+        let Some(ui) = weak.upgrade() else { return };
+        let hwnd = app(|a| a.hwnd());
+        if hwnd != 0 {
+            fit_window_to_screen(&ui, HWND(hwnd as _));
+            apply_window_frame(HWND(hwnd as _));
+            install_history_buttons(hwnd);
+            dnd::install(hwnd, dnd::Hooks { target_at: dnd_target_at, dropped: dnd_dropped, hover: dnd_hover });
+        } else if tries < 100 {
+            install_native_hooks(weak.clone(), tries + 1);
+        }
+    });
+}
+
+fn dnd_target_at(x: i32, y: i32) -> Option<(PathBuf, Option<usize>)> {
+    app(|a| a.drop_target_at(x, y))
+}
+
+fn dnd_dropped(files: Vec<PathBuf>, target: PathBuf, move_: bool) {
+    app(|a| a.drop_files(files, target, move_));
+}
+
+fn dnd_hover(row: Option<usize>) {
+    app(|a| a.set_drop_row(row));
+}
+
 fn main() -> Result<(), slint::PlatformError> {
     let ui = AppWindow::new()?;
     let tab_model = Rc::new(VecModel::default());
@@ -1691,6 +2255,11 @@ fn main() -> Result<(), slint::PlatformError> {
     ui.set_show_ext(show_ext);
     start_icon_worker();
 
+    let desktop = shell::desktop().ok();
+    let downloads = shell::downloads().ok();
+    let favorites = load_favorites(desktop.as_deref(), downloads.as_deref());
+    let drives = shell::drives();
+
     APP.with(|a| {
         let _ = a.set(App {
             ui: ui.as_weak(),
@@ -1705,19 +2274,41 @@ fn main() -> Result<(), slint::PlatformError> {
             menu_busy: Cell::new(false),
             search_seq: Arc::default(),
             install_offered: Cell::new(false),
+            favorites: RefCell::new(favorites),
+            desktop,
+            downloads,
+            drives,
+            drag_armed: Cell::new(false),
+            pending_collapse: Cell::new(None),
+            rubber_base: RefCell::default(),
+            rubber_last: Cell::new((usize::MAX, 0)),
+            drop_row: Cell::new(-1),
         });
     });
+
+    // Hiding a window alone leaves the process running; a close request quits the app.
+    ui.window().on_close_requested(|| {
+        let _ = slint::quit_event_loop();
+        slint::CloseRequestResponse::HideWindow
+    });
+
+    // The native window is realized once the event loop runs; retry until it has an HWND.
+    install_native_hooks(ui.as_weak(), 0);
 
     ui.on_navigate(|t| app(|a| a.address(&t)));
     ui.on_search(|t| app(|a| a.search(&t)));
     ui.on_back(|| app(|a| a.back()));
     ui.on_forward(|| app(|a| a.forward()));
     ui.on_up(|| app(|a| a.up()));
+    ui.on_refresh(|| app(|a| a.refresh()));
     ui.on_tab_select(|i| app(|a| a.select_tab(i as usize, true)));
     ui.on_tab_close(|i| app(|a| a.close_tab(i as usize)));
     ui.on_tab_new(|| app(|a| a.new_tab(a.tab().cwd.borrow().clone())));
     ui.on_sort(|c| app(|a| a.sort(c as usize)));
     ui.on_row_pressed(|r, m| app(|a| a.row_pressed(r as usize, m.control, m.shift)));
+    ui.on_row_clicked(|r| app(|a| a.row_clicked(r as usize)));
+    ui.on_row_middle(|r| app(|a| a.row_middle(r as usize)));
+    ui.on_row_drag(|r| app(|a| a.row_drag(r as usize)));
     ui.on_row_open(|r| {
         app(|a| {
             let t = a.tab();
@@ -1729,7 +2320,17 @@ fn main() -> Result<(), slint::PlatformError> {
     ui.on_rename_done(|text, commit| app(|a| a.rename_done(&text, commit)));
     ui.on_row_menu(|r| app(|a| a.row_menu(r as usize)));
     ui.on_row_hover(|r| app(|a| a.row_hover(r as usize)));
-    ui.on_blank_pressed(|right| app(|a| a.blank_pressed(right)));
+    ui.on_blank_pressed(|right, ctrl| app(|a| a.blank_pressed(right, ctrl)));
+    ui.on_place_open(|p| app(|a| a.open_place(&p)));
+    ui.on_place_add(|| app(|a| a.add_favorite()));
+    ui.on_place_remove(|p| app(|a| a.remove_favorite(&p)));
+    ui.on_history(|d| app(|a| if d < 0 { a.back() } else { a.forward() }));
+    ui.on_rubber_start(|ctrl| app(|a| a.rubber_start(ctrl)));
+    ui.on_rubber_move(|y1, y2| app(|a| a.rubber_move(y1, y2)));
+    ui.on_rubber_end(|| app(|a| a.rubber_end()));
+    ui.on_window_minimize(|| app(|a| a.minimize_window()));
+    ui.on_window_toggle_maximize(|| app(|a| a.toggle_maximize()));
+    ui.on_window_close(|| app(|a| a.close_window()));
     ui.on_new_folder(|| app(|a| a.new_folder()));
     ui.on_new_file(|| app(|a| a.new_file()));
     ui.on_delete_selected(|| app(|a| {

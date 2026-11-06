@@ -5,6 +5,7 @@ pub mod icons;
 pub mod index;
 pub mod menu;
 pub mod shell;
+pub mod watch;
 
 use std::cmp::Ordering;
 use std::io;

@@ -1,4 +1,4 @@
-import { LineEdit, Button, CheckBox, ListView, Palette } from "std-widgets.slint";
+import { LineEdit, CheckBox, ListView, ScrollView, Palette } from "std-widgets.slint";
 
 export struct Row {
     name: string,
@@ -16,6 +16,62 @@ export struct Row {
 
 export struct TabInfo {
     title: string,
+}
+
+export struct Place {
+    title: string,
+    path: string,
+    active: bool,
+    removable: bool,
+    icon: image,
+}
+
+enum CaptionGlyph {
+    minimize,
+    maximize,
+    restore,
+    close,
+}
+
+// A minimize / maximize / close button in the custom title bar.
+component WindowButton inherits Rectangle {
+    in property <CaptionGlyph> kind: CaptionGlyph.minimize;
+    callback clicked;
+
+    width: 46px;
+    height: 40px;
+    background: touch.pressed
+        ? (kind == CaptionGlyph.close ? #c50f1f : Palette.foreground.transparentize(0.78))
+        : touch.has-hover
+        ? (kind == CaptionGlyph.close ? #e81123 : Palette.foreground.transparentize(0.86))
+        : transparent;
+
+    // Caption icons are drawn as paths so they stay crisp and identical at every DPI.
+    Path {
+        x: (root.width - 10px) / 2;
+        y: (root.height - 10px) / 2;
+        width: 10px;
+        height: 10px;
+        viewbox-width: 10;
+        viewbox-height: 10;
+        fill: transparent;
+        stroke: kind == CaptionGlyph.close && (touch.has-hover || touch.pressed) ? white : Palette.foreground;
+        stroke-width: 1px;
+        commands: kind == CaptionGlyph.minimize
+            ? "M 0 7.5 L 10 7.5"
+            : kind == CaptionGlyph.maximize
+            ? "M 0.5 0.5 L 9.5 0.5 L 9.5 9.5 L 0.5 9.5 Z"
+            : kind == CaptionGlyph.restore
+            ? "M 3.5 0.5 L 9.5 0.5 L 9.5 6.5 M 0.5 3.5 L 6.5 3.5 L 6.5 9.5 L 0.5 9.5 Z"
+            : "M 0.5 0.5 L 9.5 9.5 M 9.5 0.5 L 0.5 9.5";
+    }
+
+    touch := TouchArea {
+        mouse-cursor: pointer;
+        clicked => {
+            root.clicked();
+        }
+    }
 }
 
 component HeaderCell inherits Rectangle {
@@ -49,10 +105,217 @@ component HeaderCell inherits Rectangle {
     }
 }
 
+// A flat toolbar button: no border or fill until hovered.
+component ToolButton inherits Rectangle {
+    in property <string> text;
+    in property <length> font-size: 13px;
+    in property <bool> enabled: true;
+    callback clicked;
+
+    horizontal-stretch: 0;
+    min-width: max(30px, layout.min-width);
+    height: 30px;
+    border-radius: 6px;
+    opacity: root.enabled ? 1 : 0.4;
+    background: root.enabled && touch.has-hover ? Palette.foreground.transparentize(0.9) : transparent;
+
+    layout := HorizontalLayout {
+        padding-left: 9px;
+        padding-right: 9px;
+        alignment: center;
+        Text {
+            text: root.text;
+            font-size: root.font-size;
+            color: Palette.foreground;
+            vertical-alignment: center;
+        }
+    }
+
+    touch := TouchArea {
+        enabled: root.enabled;
+        clicked => {
+            root.clicked();
+        }
+    }
+}
+
+// One folder or drive in the sidebar.
+component PlaceRow inherits Rectangle {
+    in property <Place> place;
+    callback open;
+    callback remove;
+    callback history(int);
+
+    height: 30px;
+    border-radius: 6px;
+    background: place.active ? Palette.accent-background.transparentize(0.82) : touch.has-hover || remove-touch.has-hover ? Palette.foreground.transparentize(0.94) : transparent;
+
+    touch := TouchArea {
+        pointer-event(e) => {
+            if e.kind == PointerEventKind.down && e.button == PointerEventButton.left {
+                root.open();
+            }
+            if e.kind == PointerEventKind.down && e.button == PointerEventButton.back {
+                root.history(-1);
+            }
+            if e.kind == PointerEventKind.down && e.button == PointerEventButton.forward {
+                root.history(1);
+            }
+        }
+    }
+
+    HorizontalLayout {
+        padding-left: 8px;
+        padding-right: 4px;
+        spacing: 8px;
+        Image {
+            width: 16px;
+            source: place.icon;
+            image-fit: contain;
+        }
+        Text {
+            text: place.title;
+            overflow: elide;
+            vertical-alignment: center;
+            horizontal-stretch: 1;
+            font-weight: place.active ? 600 : 400;
+            color: Palette.foreground;
+        }
+        Rectangle {
+            width: 20px;
+            height: 20px;
+            border-radius: 4px;
+            background: remove-touch.has-hover ? Palette.foreground.transparentize(0.9) : transparent;
+            opacity: place.removable && (touch.has-hover || remove-touch.has-hover) ? 1 : 0;
+            Text {
+                text: "×";
+                font-size: 14px;
+                horizontal-alignment: center;
+                vertical-alignment: center;
+                color: Palette.foreground;
+            }
+            remove-touch := TouchArea {
+                enabled: place.removable;
+                clicked => {
+                    root.remove();
+                }
+            }
+        }
+    }
+}
+
+component Sidebar inherits Rectangle {
+    in property <[Place]> favorites;
+    in property <[Place]> drives;
+    callback open(string);
+    callback add;
+    callback remove(string);
+    callback history(int);
+
+    private property <brush> dim: Palette.foreground.transparentize(0.4);
+
+    background: Palette.alternate-background;
+
+    VerticalLayout {
+        padding: 8px;
+        spacing: 2px;
+
+        HorizontalLayout {
+            height: 26px;
+            padding-left: 6px;
+            padding-right: 4px;
+            Text {
+                text: "즐겨찾기";
+                font-size: 12px;
+                color: root.dim;
+                vertical-alignment: center;
+                horizontal-stretch: 1;
+            }
+            Rectangle {
+                width: 22px;
+                height: 22px;
+                border-radius: 4px;
+                background: add-touch.has-hover ? Palette.foreground.transparentize(0.9) : transparent;
+                Text {
+                    text: "+";
+                    font-size: 16px;
+                    color: Palette.foreground;
+                    horizontal-alignment: center;
+                    vertical-alignment: center;
+                }
+                add-touch := TouchArea {
+                    clicked => {
+                        root.add();
+                    }
+                }
+            }
+        }
+
+        if root.favorites.length == 0: HorizontalLayout {
+            height: 20px;
+            padding-left: 8px;
+            padding-top: 2px;
+            Text {
+                text: "현재 폴더를 추가하려면 +";
+                font-size: 11px;
+                color: root.dim;
+            }
+        }
+
+        ScrollView {
+            vertical-stretch: 1;
+
+            VerticalLayout {
+                spacing: 1px;
+
+                for p in root.favorites: PlaceRow {
+                    place: p;
+                    open => {
+                        root.open(p.path);
+                    }
+                    remove => {
+                        root.remove(p.path);
+                    }
+                    history(d) => {
+                        root.history(d);
+                    }
+                }
+
+                Rectangle {
+                    height: 12px;
+                }
+
+                HorizontalLayout {
+                    height: 22px;
+                    padding-left: 6px;
+                    padding-bottom: 2px;
+                    Text {
+                        text: "내 PC";
+                        font-size: 12px;
+                        color: root.dim;
+                        vertical-alignment: center;
+                    }
+                }
+
+                for d in root.drives: PlaceRow {
+                    place: d;
+                    open => {
+                        root.open(d.path);
+                    }
+                    history(n) => {
+                        root.history(n);
+                    }
+                }
+            }
+        }
+    }
+}
+
 export component AppWindow inherits Window {
     in property <string> folder;
     title: root.folder == "" ? "Fast Explorer" : root.folder + " - Fast Explorer";
     icon: @image-url("assets/icon-256.png");
+    no-frame: true;
     preferred-width: 1100px;
     preferred-height: 720px;
     background: Palette.background;
@@ -71,8 +334,13 @@ export component AppWindow inherits Window {
     in property <bool> can-forward;
     in property <int> sort-column;
     in property <bool> sort-desc;
+    in property <[Place]> favorites;
+    in property <[Place]> drives;
+    in property <int> drop-row: -1;
+    in-out property <bool> rubber-on: false;
     in-out property <length> list-y <=> list.content-y;
     out property <length> list-height: list.visible-height;
+    out property <length> list-width: list.width;
     out property <length> row-height: 26px;
     // Where the list sits in the window, to place keyboard-opened menus.
     out property <length> list-origin-x: list.absolute-position.x;
@@ -83,20 +351,34 @@ export component AppWindow inherits Window {
     callback back();
     callback forward();
     callback up();
+    callback refresh();
     callback tab-select(int);
     callback tab-close(int);
     callback tab-new();
     callback sort(int);
     callback row-pressed(int, KeyboardModifiers);
+    callback row-clicked(int);
+    callback row-middle(int);
     callback row-open(int);
     callback row-menu(int);
     callback row-hover(int);
-    callback blank-pressed(bool);  // true = right button
+    callback row-drag(int);
+    callback blank-pressed(bool, bool);  // (right button, control held)
     callback rename-done(string, bool);
     callback new-folder();
     callback new-file();
     callback delete-selected();
     callback view-changed();
+    callback place-open(string);
+    callback place-add();
+    callback place-remove(string);
+    callback history(int);
+    callback rubber-start(bool);
+    callback rubber-move(length, length);
+    callback rubber-end();
+    callback window-minimize();
+    callback window-toggle-maximize();
+    callback window-close();
     // `in-list` is true when the file list has focus; otherwise only global shortcuts apply.
     callback key(KeyEvent, bool) -> bool;
 
@@ -114,12 +396,29 @@ export component AppWindow inherits Window {
         search-box.select-all();
     }
 
-    private property <length> w-name: root.search-mode ? 300px : 440px;
-    private property <length> w-location: 360px;
+    private property <length> w-name: root.search-mode ? 280px : 440px;
+    private property <length> w-location: 210px;
     private property <length> w-date: 150px;
     private property <length> w-kind: 130px;
     private property <length> w-size: 100px;
+    // Explorer leaves a small strip on each side of the rows where a drag starts a
+    // rubber-band selection instead of hitting a row.
+    private property <length> list-margin: 6px;
     private property <brush> dim: Palette.foreground.transparentize(0.4);
+
+    // The mouse's back/forward buttons work anywhere nothing more specific handles them.
+    TouchArea {
+        width: 100%;
+        height: 100%;
+        pointer-event(e) => {
+            if e.kind == PointerEventKind.down && e.button == PointerEventButton.back {
+                root.history(-1);
+            }
+            if e.kind == PointerEventKind.down && e.button == PointerEventButton.forward {
+                root.history(1);
+            }
+        }
+    }
 
     FocusScope {
         key-pressed(e) => {
@@ -132,8 +431,15 @@ export component AppWindow inherits Window {
             Rectangle {
                 height: 40px;
                 background: Palette.alternate-background;
+            // Drag the window from the empty part of the tab strip. Stop short of the
+            // caption buttons so they own every pointer event in their corner.
+            WindowMoveArea {
+                width: parent.width - 138px;
+                height: 100%;
+            }
             HorizontalLayout {
                 padding-left: 6px;
+                padding-right: 138px;
                 padding-top: 6px;
                 spacing: 2px;
                 alignment: start;
@@ -155,8 +461,14 @@ export component AppWindow inherits Window {
                             if e.kind == PointerEventKind.down && e.button == PointerEventButton.left {
                                 root.tab-select(i);
                             }
-                            if e.kind == PointerEventKind.up && e.button == PointerEventButton.middle {
+                            if e.kind == PointerEventKind.down && e.button == PointerEventButton.middle {
                                 root.tab-close(i);
+                            }
+                            if e.kind == PointerEventKind.down && e.button == PointerEventButton.back {
+                                root.history(-1);
+                            }
+                            if e.kind == PointerEventKind.down && e.button == PointerEventButton.forward {
+                                root.history(1);
                             }
                         }
                     }
@@ -213,28 +525,60 @@ export component AppWindow inherits Window {
                     }
                 }
             }
+
+            // Custom window controls (the native title bar is gone).
+            Rectangle {
+                x: parent.width - 138px;
+                width: 138px;
+                height: parent.height;
+                background: Palette.alternate-background;
+                HorizontalLayout {
+                    WindowButton {
+                        kind: CaptionGlyph.minimize;
+                        clicked => {
+                            root.window-minimize();
+                        }
+                    }
+                    WindowButton {
+                        kind: root.maximized ? CaptionGlyph.restore : CaptionGlyph.maximize;
+                        clicked => {
+                            root.window-toggle-maximize();
+                        }
+                    }
+                    WindowButton {
+                        kind: CaptionGlyph.close;
+                        clicked => {
+                            root.window-close();
+                        }
+                    }
+                }
+            }
             }
 
             // Navigation + address bar
             HorizontalLayout {
                 padding: 6px;
                 spacing: 4px;
-                Button {
+                cross-axis-alignment: center;
+                ToolButton {
                     text: "←";
+                    font-size: 16px;
                     enabled: root.can-back;
                     clicked => {
                         root.back();
                     }
                 }
-                Button {
+                ToolButton {
                     text: "→";
+                    font-size: 16px;
                     enabled: root.can-forward;
                     clicked => {
                         root.forward();
                     }
                 }
-                Button {
+                ToolButton {
                     text: "↑";
+                    font-size: 16px;
                     clicked => {
                         root.up();
                     }
@@ -255,220 +599,312 @@ export component AppWindow inherits Window {
                 }
             }
 
-            // Command bar
+            // Sidebar + file list
             HorizontalLayout {
-                padding-left: 6px;
-                padding-right: 10px;
-                padding-bottom: 4px;
-                spacing: 4px;
-                Button {
-                    text: "새 폴더";
-                    clicked => {
-                        root.new-folder();
-                    }
-                }
-                Button {
-                    text: "새 텍스트 문서";
-                    clicked => {
-                        root.new-file();
-                    }
-                }
-                Button {
-                    text: "삭제";
-                    clicked => {
-                        root.delete-selected();
-                    }
-                }
-                Rectangle {
-                    horizontal-stretch: 1;
-                }
-                CheckBox {
-                    text: "숨긴 항목";
-                    checked <=> root.show-hidden;
-                    changed checked => {
-                        root.view-changed();
-                    }
-                }
-                CheckBox {
-                    text: "파일 확장명";
-                    checked <=> root.show-ext;
-                    changed checked => {
-                        root.view-changed();
-                    }
-                }
-            }
+                vertical-stretch: 1;
 
-            // Column header
-            Rectangle {
-                height: 28px;
-                HorizontalLayout {
-                    padding-left: 6px;
-                    alignment: start;
-                    HeaderCell {
-                        width: root.w-name;
-                        text: "이름";
-                        sorted: root.sort-column == 0;
-                        descending: root.sort-desc;
-                        clicked => {
-                            root.sort(0);
-                        }
+                Sidebar {
+                    width: 196px;
+                    vertical-stretch: 1;
+                    favorites: root.favorites;
+                    drives: root.drives;
+                    open(p) => {
+                        root.place-open(p);
                     }
-                    if root.search-mode: HeaderCell {
-                        width: root.w-location;
-                        text: "위치";
+                    add => {
+                        root.place-add();
                     }
-                    HeaderCell {
-                        width: root.w-date;
-                        text: "수정한 날짜";
-                        sorted: root.sort-column == 1;
-                        descending: root.sort-desc;
-                        clicked => {
-                            root.sort(1);
-                        }
+                    remove(p) => {
+                        root.place-remove(p);
                     }
-                    HeaderCell {
-                        width: root.w-kind;
-                        text: "유형";
-                        sorted: root.sort-column == 2;
-                        descending: root.sort-desc;
-                        clicked => {
-                            root.sort(2);
-                        }
-                    }
-                    HeaderCell {
-                        width: root.w-size;
-                        text: "크기";
-                        sorted: root.sort-column == 3;
-                        descending: root.sort-desc;
-                        clicked => {
-                            root.sort(3);
-                        }
+                    history(d) => {
+                        root.history(d);
                     }
                 }
                 Rectangle {
-                    y: parent.height - 1px;
-                    height: 1px;
+                    width: 1px;
                     background: Palette.border;
                 }
-            }
 
-            // File list (virtualized: only visible rows are instantiated)
-            list-focus := FocusScope {
-                vertical-stretch: 1;
-                key-pressed(e) => {
-                    root.key(e, true) ? EventResult.accept : EventResult.reject
-                }
-
-                // Clicks that no row takes land here: empty space below the rows.
-                blank-touch := TouchArea {
-                    width: 100%;
-                    height: 100%;
-                    pointer-event(e) => {
-                        if e.kind == PointerEventKind.down && (e.button == PointerEventButton.left || e.button == PointerEventButton.right) {
-                            list-focus.focus();
-                            root.blank-pressed(e.button == PointerEventButton.right);
+                VerticalLayout {
+                    // Command bar
+                    HorizontalLayout {
+                        padding-left: 6px;
+                        padding-right: 10px;
+                        padding-top: 6px;
+                        padding-bottom: 4px;
+                        spacing: 4px;
+                        cross-axis-alignment: center;
+                        ToolButton {
+                            text: "새 폴더";
+                            clicked => {
+                                root.new-folder();
+                            }
+                        }
+                        ToolButton {
+                            text: "새 텍스트 문서";
+                            clicked => {
+                                root.new-file();
+                            }
+                        }
+                        ToolButton {
+                            text: "삭제";
+                            clicked => {
+                                root.delete-selected();
+                            }
+                        }
+                        ToolButton {
+                            text: "새로 고침";
+                            clicked => {
+                                root.refresh();
+                            }
+                        }
+                        Rectangle {
+                            horizontal-stretch: 1;
+                        }
+                        CheckBox {
+                            text: "숨긴 항목";
+                            checked <=> root.show-hidden;
+                            changed checked => {
+                                root.view-changed();
+                            }
+                        }
+                        CheckBox {
+                            text: "파일 확장명";
+                            checked <=> root.show-ext;
+                            changed checked => {
+                                root.view-changed();
+                            }
                         }
                     }
 
-                list := ListView {
-                    width: 100%;
-                    height: 100%;
-                    for r[i] in root.rows: Rectangle {
-                        height: root.row-height;
-                        background: r.selected ? Palette.accent-background.transparentize(list-focus.has-focus ? 0.75 : 0.88) : row-touch.has-hover ? Palette.foreground.transparentize(0.95) : transparent;
-
-                        row-touch := TouchArea {
-                            pointer-event(e) => {
-                                if e.kind == PointerEventKind.down && e.button == PointerEventButton.left {
-                                    list-focus.focus();
-                                    root.row-pressed(i, e.modifiers);
-                                }
-                                if e.kind == PointerEventKind.down && e.button == PointerEventButton.right {
-                                    list-focus.focus();
-                                    root.row-menu(i);
-                                }
-                            }
-                            double-clicked => {
-                                root.row-open(i);
-                            }
-                            // Prefetch the shell menu for the item under the mouse.
-                            changed has-hover => {
-                                if self.has-hover {
-                                    root.row-hover(i);
-                                }
-                            }
-                        }
-
+                    // Column header
+                    Rectangle {
+                        height: 28px;
                         HorizontalLayout {
-                            padding-left: 6px;
+                            padding-left: root.list-margin + 6px;
                             alignment: start;
-                            Image {
-                                width: 16px;
-                                source: r.icon;
-                                image-fit: contain;
-                            }
-                            Rectangle {
-                                width: 6px;
-                            }
-                            if !r.editing: Text {
-                                width: root.w-name - 22px;
-                                text: r.name;
-                                overflow: elide;
-                                vertical-alignment: center;
-                                color: Palette.foreground;
-                            }
-                            if r.editing: LineEdit {
-                                width: root.w-name - 22px;
-                                text: r.name;
-                                init => {
-                                    self.focus();
-                                    self.set-selection-offsets(0, r.stem);
-                                }
-                                accepted(t) => {
-                                    root.rename-done(t, true);
-                                }
-                                key-pressed(e) => {
-                                    if e.text == Key.Escape {
-                                        root.rename-done("", false);
-                                        return accept;
-                                    }
-                                    reject
-                                }
-                                changed has-focus => {
-                                    if !self.has-focus {
-                                        root.rename-done(self.text, true);
-                                    }
+                            HeaderCell {
+                                width: root.w-name;
+                                text: "이름";
+                                sorted: root.sort-column == 0;
+                                descending: root.sort-desc;
+                                clicked => {
+                                    root.sort(0);
                                 }
                             }
-                            if root.search-mode: Text {
+                            if root.search-mode: HeaderCell {
                                 width: root.w-location;
-                                text: r.location;
-                                overflow: elide;
-                                vertical-alignment: center;
-                                color: root.dim;
+                                text: "위치";
                             }
-                            Text {
+                            HeaderCell {
                                 width: root.w-date;
-                                text: r.date;
-                                vertical-alignment: center;
-                                color: root.dim;
+                                text: "수정한 날짜";
+                                sorted: root.sort-column == 1;
+                                descending: root.sort-desc;
+                                clicked => {
+                                    root.sort(1);
+                                }
                             }
-                            Text {
+                            HeaderCell {
                                 width: root.w-kind;
-                                text: r.kind;
-                                vertical-alignment: center;
-                                color: root.dim;
+                                text: "유형";
+                                sorted: root.sort-column == 2;
+                                descending: root.sort-desc;
+                                clicked => {
+                                    root.sort(2);
+                                }
                             }
-                            Text {
+                            HeaderCell {
                                 width: root.w-size;
-                                text: r.size;
-                                horizontal-alignment: right;
-                                vertical-alignment: center;
-                                color: root.dim;
+                                text: "크기";
+                                sorted: root.sort-column == 3;
+                                descending: root.sort-desc;
+                                clicked => {
+                                    root.sort(3);
+                                }
                             }
                         }
+                        Rectangle {
+                            y: parent.height - 1px;
+                            height: 1px;
+                            background: Palette.border;
+                        }
                     }
-                }
+
+                    // File list (virtualized: only visible rows are instantiated)
+                    list-focus := FocusScope {
+                        vertical-stretch: 1;
+                        key-pressed(e) => {
+                            root.key(e, true) ? EventResult.accept : EventResult.reject
+                        }
+
+                        // Clicks that no row takes land here: empty space below the rows.
+                        blank-touch := TouchArea {
+                            width: 100%;
+                            height: 100%;
+                            pointer-event(e) => {
+                                if e.kind == PointerEventKind.down {
+                                    if e.button == PointerEventButton.left {
+                                        list-focus.focus();
+                                        root.blank-pressed(false, e.modifiers.control);
+                                        root.rubber-start(e.modifiers.control);
+                                        root.rubber-on = true;
+                                    }
+                                    if e.button == PointerEventButton.right {
+                                        list-focus.focus();
+                                        root.blank-pressed(true, false);
+                                    }
+                                    if e.button == PointerEventButton.back {
+                                        root.history(-1);
+                                    }
+                                    if e.button == PointerEventButton.forward {
+                                        root.history(1);
+                                    }
+                                }
+                                if (e.kind == PointerEventKind.up || e.kind == PointerEventKind.cancel) && root.rubber-on {
+                                    root.rubber-on = false;
+                                    root.rubber-end();
+                                }
+                            }
+                            moved => {
+                                if root.rubber-on {
+                                    root.rubber-move(blank-touch.pressed-y, blank-touch.mouse-y);
+                                }
+                            }
+
+                        list := ListView {
+                            x: root.list-margin;
+                            width: parent.width - 2 * root.list-margin;
+                            height: 100%;
+                            for r[i] in root.rows: Rectangle {
+                                height: root.row-height;
+                                background: i == root.drop-row ? Palette.accent-background.transparentize(0.6) : r.selected ? Palette.accent-background.transparentize(list-focus.has-focus ? 0.75 : 0.88) : row-touch.has-hover ? Palette.foreground.transparentize(0.95) : transparent;
+
+                                row-touch := TouchArea {
+                                    pointer-event(e) => {
+                                        if e.kind == PointerEventKind.down && e.button == PointerEventButton.left {
+                                            list-focus.focus();
+                                            root.row-pressed(i, e.modifiers);
+                                        }
+                                        if e.kind == PointerEventKind.down && e.button == PointerEventButton.right {
+                                            list-focus.focus();
+                                            root.row-menu(i);
+                                        }
+                                        if e.kind == PointerEventKind.down && e.button == PointerEventButton.middle {
+                                            list-focus.focus();
+                                            root.row-middle(i);
+                                        }
+                                        if e.kind == PointerEventKind.down && e.button == PointerEventButton.back {
+                                            root.history(-1);
+                                        }
+                                        if e.kind == PointerEventKind.down && e.button == PointerEventButton.forward {
+                                            root.history(1);
+                                        }
+                                    }
+                                    moved => {
+                                        if abs(self.mouse-x - self.pressed-x) > 5px || abs(self.mouse-y - self.pressed-y) > 5px {
+                                            root.row-drag(i);
+                                        }
+                                    }
+                                    clicked => {
+                                        root.row-clicked(i);
+                                    }
+                                    double-clicked => {
+                                        root.row-open(i);
+                                    }
+                                    // Prefetch the shell menu for the item under the mouse.
+                                    changed has-hover => {
+                                        if self.has-hover {
+                                            root.row-hover(i);
+                                        }
+                                    }
+                                }
+
+                                HorizontalLayout {
+                                    padding-left: 6px;
+                                    alignment: start;
+                                    Image {
+                                        width: 16px;
+                                        source: r.icon;
+                                        image-fit: contain;
+                                    }
+                                    Rectangle {
+                                        width: 6px;
+                                    }
+                                    if !r.editing: Text {
+                                        width: root.w-name - 22px;
+                                        text: r.name;
+                                        overflow: elide;
+                                        vertical-alignment: center;
+                                        color: Palette.foreground;
+                                    }
+                                    if r.editing: LineEdit {
+                                        width: root.w-name - 22px;
+                                        text: r.name;
+                                        init => {
+                                            self.focus();
+                                            self.set-selection-offsets(0, r.stem);
+                                        }
+                                        accepted(t) => {
+                                            root.rename-done(t, true);
+                                        }
+                                        key-pressed(e) => {
+                                            if e.text == Key.Escape {
+                                                root.rename-done("", false);
+                                                return accept;
+                                            }
+                                            reject
+                                        }
+                                        changed has-focus => {
+                                            if !self.has-focus {
+                                                root.rename-done(self.text, true);
+                                            }
+                                        }
+                                    }
+                                    if root.search-mode: Text {
+                                        width: root.w-location;
+                                        text: r.location;
+                                        overflow: elide;
+                                        vertical-alignment: center;
+                                        color: root.dim;
+                                    }
+                                    Text {
+                                        width: root.w-date;
+                                        text: r.date;
+                                        vertical-alignment: center;
+                                        color: root.dim;
+                                    }
+                                    Text {
+                                        width: root.w-kind;
+                                        text: r.kind;
+                                        vertical-alignment: center;
+                                        color: root.dim;
+                                    }
+                                    Text {
+                                        width: root.w-size;
+                                        text: r.size;
+                                        horizontal-alignment: right;
+                                        vertical-alignment: center;
+                                        color: root.dim;
+                                    }
+                                }
+                            }
+                        }
+
+                        // Rubber-band selection rectangle.
+                        Rectangle {
+                            visible: root.rubber-on;
+                            x: min(blank-touch.pressed-x, blank-touch.mouse-x);
+                            y: min(blank-touch.pressed-y, blank-touch.mouse-y);
+                            width: abs(blank-touch.mouse-x - blank-touch.pressed-x);
+                            height: abs(blank-touch.mouse-y - blank-touch.pressed-y);
+                            background: Palette.accent-background.transparentize(0.85);
+                            border-width: 1px;
+                            border-color: Palette.accent-background;
+                        }
+                        }
+                    }
                 }
             }
 
@@ -481,6 +917,16 @@ export component AppWindow inherits Window {
                     color: root.dim;
                 }
             }
+        }
+
+        // A crisp frame so the window reads as a separate surface. The native DWM
+        // frame underneath adds the outer drop shadow.
+        Rectangle {
+            width: 100%;
+            height: 100%;
+            background: transparent;
+            border-width: 1px;
+            border-color: root.maximized ? transparent : Palette.foreground.transparentize(0.6);
         }
     }
 }
