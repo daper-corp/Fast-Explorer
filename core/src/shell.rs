@@ -144,7 +144,12 @@ pub fn user_folders() -> Vec<(String, PathBuf)> {
         ("비디오", &FOLDERID_Videos),
     ]
     .into_iter()
-    .filter_map(|(name, id)| known_folder(id).ok().map(|path| (name.to_string(), path)))
+    .filter_map(|(name, id)| {
+        known_folder(id)
+            .ok()
+            .filter(|path| path.is_dir())
+            .map(|path| (name.to_string(), path))
+    })
     .collect()
 }
 

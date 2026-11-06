@@ -91,6 +91,7 @@ fn is_this_pc_name(text: &str) -> bool {
 }
 
 /// Drives and user folders shown by the "내 PC" view, built off the UI thread.
+#[derive(Clone)]
 struct ThisPcRow {
     title: String,
     path: PathBuf,
@@ -1021,23 +1022,31 @@ impl App {
 
     fn refresh_drives(&self) {
         self.devices_due.set(false);
-        let id = self.tab().id;
         thread::spawn(move || {
             let drives = shell::drives();
             let rows = build_this_pc_rows(&drives);
-            post(move |a| a.drives_refreshed(id, drives, rows));
+            post(move |a| a.drives_refreshed(drives, rows));
         });
     }
 
-    fn drives_refreshed(&self, id: u64, drives: Vec<shell::Drive>, rows: Vec<ThisPcRow>) {
+    fn drives_refreshed(&self, drives: Vec<shell::Drive>, rows: Vec<ThisPcRow>) {
         *self.drives.borrow_mut() = drives;
         self.sync_places();
-        let Some(t) = self.find(id) else { return };
-        if !is_this_pc(&t.cwd.borrow()) || t.query().is_some() || t.pending.borrow().is_some() {
-            return;
+        // Refresh every tab that is showing "내 PC" (search results and pending navigations
+        // bring their own contents and are left alone).
+        let ids: Vec<u64> = self
+            .tabs
+            .borrow()
+            .iter()
+            .filter(|t| is_this_pc(&t.cwd.borrow()) && t.query().is_none() && t.pending.borrow().is_none())
+            .map(|t| t.id)
+            .collect();
+        for id in ids {
+            if let Some(t) = self.find(id) {
+                t.epoch.fetch_add(1, SeqCst); // any in-flight snapshot is now older
+                self.apply_this_pc_rows(&t, rows.clone());
+            }
         }
-        t.epoch.fetch_add(1, SeqCst); // any in-flight snapshot is now older
-        self.apply_this_pc_rows(&t, rows);
     }
 
     fn batch(&self, id: u64, epoch: u64, batch: Vec<Entry>) {
@@ -1603,7 +1612,7 @@ impl App {
 
     fn address(&self, text: &str) {
         let t = self.tab();
-        let mut s = text.trim().trim_matches('"').to_string();
+        let mut s = expand_env(text.trim().trim_matches('"'));
         if s.is_empty() {
             return;
         }
@@ -2864,7 +2873,7 @@ fn suggest_paths(input: &str, cwd: &Path) -> Vec<Suggest> {
         out.push(Suggest { name: "내 PC".into(), detail: "드라이브와 폴더".into(), path: THIS_PC.into() });
     }
     // "C" / "C:" autocompletes to the drive root.
-    if !text.contains('\\') && !text.contains('/') {
+    if text.len() <= 2 && !text.contains('\\') && !text.contains('/') {
         let typed = text.to_lowercase();
         for drive in shell::drives() {
             let root = drive.path.display().to_string();
