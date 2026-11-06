@@ -27,7 +27,8 @@ fn live_service() {
     // System32\config or System Volume Information stay hidden.
     for q in ["SAM.LOG1", "IndexerVolumeGuid", "tracking.log", "desktop.ini"] {
         let r = query(q, 2000).unwrap();
-        let hidden = r.hits.iter().filter(|h| std::fs::read_dir(h.path.parent().unwrap()).is_err()).count();
+        // Every folder from the root down must be listable, not just the one holding the hit.
+        let hidden = r.hits.iter().filter(|h| h.path.ancestors().skip(1).any(|d| std::fs::read_dir(d).is_err())).count();
         eprintln!("{q:>24}: {} visible hits, {hidden} in unreadable folders", r.hits.len());
         assert_eq!(hidden, 0, "{q}: hits leaked from folders the user can't list");
     }

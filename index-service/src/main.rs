@@ -277,10 +277,10 @@ fn answer(pipe: File, slots: &[Slot]) {
     }
 }
 
-/// The service sees every name on the volume; the client gets only those in folders it could
-/// list itself (checked as the client, so other users' private folders stay private).
-/// Fails closed: no impersonation, no hits. Stops after `keep` visible hits (each new folder
-/// costs a CreateFile).
+/// The service sees every name on the volume; the client gets only hits it could have found by
+/// browsing: every folder from the drive root down to the hit must be listable by the client
+/// (checked as the client, so other users' private folders, and the names of folders inside
+/// them, stay private). Fails closed: no impersonation, no hits. Stops after `keep` visible hits.
 fn visible_to_client(pipe: HANDLE, hits: Vec<Hit>, keep: usize) -> Vec<Hit> {
     if unsafe { ImpersonateNamedPipeClient(pipe) }.is_err() {
         return Vec::new();
@@ -288,15 +288,22 @@ fn visible_to_client(pipe: HANDLE, hits: Vec<Hit>, keep: usize) -> Vec<Hit> {
     let mut listable: HashMap<PathBuf, bool> = HashMap::new();
     let kept = hits
         .into_iter()
-        .filter(|h| {
-            let dir = h.path.parent().unwrap_or(&h.path).to_path_buf();
-            *listable.entry(dir).or_insert_with_key(|d| can_list(d))
-        })
+        .filter(|h| h.path.parent().is_some_and(|dir| browsable(dir, &mut listable)))
         .take(keep)
         .collect();
     // Never keep serving with the client's identity.
     unsafe { RevertToSelf() }.expect("RevertToSelf");
     kept
+}
+
+/// `dir` and all its ancestors are listable; cached per folder (siblings share their ancestors).
+fn browsable(dir: &Path, cache: &mut HashMap<PathBuf, bool>) -> bool {
+    if let Some(&known) = cache.get(dir) {
+        return known;
+    }
+    let ok = dir.parent().is_none_or(|parent| browsable(parent, cache)) && can_list(dir);
+    cache.insert(dir.to_path_buf(), ok);
+    ok
 }
 
 fn can_list(dir: &Path) -> bool {

@@ -10,6 +10,7 @@ use std::sync::atomic::{AtomicU64, Ordering::SeqCst};
 use std::thread;
 use std::time::{Duration, Instant};
 
+use fex_core::content;
 use fex_core::index::{self, QueryError, Results};
 use fex_core::menu::{HANG_LIMIT, MenuHost, MenuItem, MenuResult, Request};
 use fex_core::shell::{self, Op};
@@ -45,6 +46,18 @@ const MENU_WAIT: Duration = Duration::from_millis(150);
 
 /// Most search hits shown (the status bar says how many matched in all).
 const SEARCH_LIMIT: usize = 2000;
+/// Content search stops after this many matching files.
+const CONTENT_LIMIT: usize = 5000;
+
+/// "내용:hello" / "content:hello" -> Some("hello"): search inside files.
+fn content_query(q: &str) -> Option<String> {
+    let lower = q.to_lowercase();
+    ["내용:", "content:"]
+        .iter()
+        .find(|p| lower.starts_with(**p))
+        .map(|p| q[p.len()..].trim().to_string())
+        .filter(|t| !t.is_empty())
+}
 
 const SORT_KEYS: [SortKey; 4] = [SortKey::Name, SortKey::Modified, SortKey::Type, SortKey::Size];
 
@@ -524,7 +537,9 @@ impl App {
             return;
         }
         *t.rows.order.borrow_mut() = order;
-        *t.note.borrow_mut() = format!("목록 {:.1} ms · 정렬 {:.1} ms", t.list_ms.get(), ms(took));
+        if t.search.borrow().is_none() {
+            *t.note.borrow_mut() = format!("목록 {:.1} ms · 정렬 {:.1} ms", t.list_ms.get(), ms(took));
+        }
         self.apply_after(&t);
         t.rows.notify.reset();
         self.reveal_cursor(&t);
@@ -879,6 +894,9 @@ impl App {
     }
 
     fn search_in(&self, t: &Rc<Tab>, query: String) {
+        if let Some(text) = content_query(&query) {
+            return self.content_search(t, query, text);
+        }
         let seq = self.search_seq.fetch_add(1, SeqCst) + 1;
         let (id, latest) = (t.id, self.search_seq.clone());
         thread::spawn(move || {
@@ -946,6 +964,118 @@ impl App {
             self.ui().set_list_y(0.0);
         }
         self.update_status(&t);
+    }
+
+    /// "내용:<text>" searches inside the files under the current folder; hits stream in.
+    fn content_search(&self, t: &Rc<Tab>, query: String, text: String) {
+        let root = t.cwd.borrow().clone();
+        if root.as_os_str().is_empty() {
+            return;
+        }
+        let seq = self.search_seq.fetch_add(1, SeqCst) + 1;
+        // Switch to an empty result list at once; it fills as files match.
+        t.epoch.fetch_add(1, SeqCst);
+        t.pending.take();
+        t.bump_sort();
+        t.rows.replace(Vec::new(), Vec::new());
+        t.cursor.set(None);
+        t.anchor.set(None);
+        *t.search.borrow_mut() = Some((query, Vec::new()));
+        *t.note.borrow_mut() = format!("'{}' 아래에서 내용 검색 중…", t.title());
+        if self.is_active(t) {
+            self.ui().set_search_mode(true);
+            self.ui().set_list_y(0.0);
+        }
+        self.update_status(t);
+
+        let (id, latest) = (t.id, self.search_seq.clone());
+        // Walking a whole tree per keystroke is wasteful: start once typing pauses.
+        slint::Timer::single_shot(Duration::from_millis(300), move || {
+            if latest.load(SeqCst) == seq {
+                thread::spawn(move || content_worker(id, seq, latest, root, text));
+            }
+        });
+    }
+}
+
+/// Runs a content search and streams the matching files to the tab in batches.
+fn content_worker(id: u64, seq: u64, latest: Arc<AtomicU64>, root: PathBuf, text: String) {
+    use std::sync::Mutex;
+    use std::sync::atomic::{AtomicBool, AtomicUsize};
+    let start = Instant::now();
+    let pending = Mutex::new(Vec::<PathBuf>::new());
+    let (count, done) = (AtomicUsize::new(0), AtomicBool::new(false));
+    let flush = || {
+        let batch = std::mem::take(&mut *pending.lock().unwrap());
+        if !batch.is_empty() {
+            let entries = batch.iter().map(|p| hit_entry(&index::Hit { path: p.clone(), dir: false })).collect();
+            post(move |a| a.content_batch(id, seq, batch, entries));
+        }
+    };
+    let r = thread::scope(|s| {
+        // Shows hits within ~0.1 s even when they're sparse (a cold disk can take minutes to
+        // finish), while batching keeps the UI cheap when they pour in.
+        s.spawn(|| {
+            while !done.load(SeqCst) {
+                thread::sleep(Duration::from_millis(100));
+                flush();
+            }
+        });
+        let r = content::search(&root, &text, |path| {
+            if latest.load(SeqCst) != seq {
+                return false; // the query changed
+            }
+            pending.lock().unwrap().push(path);
+            count.fetch_add(1, SeqCst) + 1 < CONTENT_LIMIT
+        });
+        done.store(true, SeqCst);
+        r
+    });
+    flush();
+    let (took, capped) = (start.elapsed(), count.load(SeqCst) >= CONTENT_LIMIT);
+    post(move |a| a.content_done(id, seq, took, capped, r.err()));
+}
+
+impl App {
+    fn content_batch(&self, id: u64, seq: u64, paths: Vec<PathBuf>, entries: Vec<Entry>) {
+        let Some(t) = self.find(id) else { return };
+        if self.search_seq.load(SeqCst) != seq {
+            return;
+        }
+        let rows = &t.rows;
+        let (start, n) = {
+            let mut all = rows.entries.borrow_mut();
+            let start = all.len();
+            Arc::make_mut(&mut all).extend(entries);
+            let end = all.len();
+            rows.order.borrow_mut().extend(start as u32..end as u32);
+            rows.selected.borrow_mut().resize(end, false);
+            rows.locations
+                .borrow_mut()
+                .extend(paths.iter().map(|p| p.parent().map(|d| d.display().to_string()).unwrap_or_default()));
+            if let Some((_, hits)) = t.search.borrow_mut().as_mut() {
+                hits.extend(paths);
+            }
+            (start, end - start)
+        };
+        rows.notify.row_added(start, n);
+        self.update_status(&t);
+    }
+
+    fn content_done(&self, id: u64, seq: u64, took: Duration, capped: bool, err: Option<String>) {
+        let Some(t) = self.find(id) else { return };
+        if self.search_seq.load(SeqCst) != seq {
+            return;
+        }
+        let mut note = format!("내용 검색 {:.1} s", took.as_secs_f64());
+        if capped {
+            note += &format!(" · 처음 {CONTENT_LIMIT}개에서 멈춤");
+        }
+        if let Some(e) = err {
+            note += &format!(" · {e}");
+        }
+        *t.note.borrow_mut() = note;
+        self.resort(&t);
     }
 
     fn exit_search(&self, t: &Rc<Tab>) {
@@ -1438,4 +1568,15 @@ fn main() -> Result<(), slint::PlatformError> {
     let start = std::env::args().nth(1).unwrap_or_else(|| r"C:\".into());
     app(|a| a.new_tab(PathBuf::from(start)));
     ui.run()
+}
+
+#[cfg(test)]
+mod tests {
+    #[test]
+    fn content_prefix() {
+        assert_eq!(super::content_query("내용:보고서 초안").as_deref(), Some("보고서 초안"));
+        assert_eq!(super::content_query("Content: TODO ").as_deref(), Some("TODO"));
+        assert_eq!(super::content_query("내용:"), None); // nothing to look for yet
+        assert_eq!(super::content_query("notepad"), None);
+    }
 }

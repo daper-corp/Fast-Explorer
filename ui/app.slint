@@ -216,7 +216,7 @@ export component AppWindow inherits Window {
                 }
                 search-box := LineEdit {
                     width: 280px;
-                    placeholder-text: "모든 드라이브에서 검색 (Ctrl+F)";
+                    placeholder-text: "검색 (Ctrl+F) · 내용:단어 = 파일 내용";
                     text <=> root.search-text;
                     edited(t) => {
                         root.search(t);
