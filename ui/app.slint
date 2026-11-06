@@ -26,6 +26,12 @@ export struct Place {
     icon: image,
 }
 
+// One folder-name button in the address bar.
+export struct Crumb {
+    title: string,
+    path: string,
+}
+
 enum CaptionGlyph {
     minimize,
     maximize,
@@ -139,6 +145,37 @@ component ToolButton inherits Rectangle {
     }
 }
 
+// One folder in the address bar; clicking it goes back up to that folder.
+component CrumbButton inherits Rectangle {
+    in property <string> title;
+    callback clicked;
+
+    horizontal-stretch: 0;
+    height: 22px;
+    border-radius: 4px;
+    background: touch.has-hover ? Palette.foreground.transparentize(0.88) : transparent;
+
+    HorizontalLayout {
+        padding-left: 6px;
+        padding-right: 6px;
+        alignment: center;
+        Text {
+            text: root.title;
+            font-size: 13px;
+            color: Palette.foreground;
+            vertical-alignment: center;
+            overflow: elide;
+        }
+    }
+
+    touch := TouchArea {
+        mouse-cursor: pointer;
+        clicked => {
+            root.clicked();
+        }
+    }
+}
+
 // One folder or drive in the sidebar.
 component PlaceRow inherits Rectangle {
     in property <Place> place;
@@ -184,6 +221,7 @@ component PlaceRow inherits Rectangle {
         Rectangle {
             width: 20px;
             height: 20px;
+            cross-axis-self-alignment: center;
             border-radius: 4px;
             background: remove-touch.has-hover ? Palette.foreground.transparentize(0.9) : transparent;
             opacity: place.removable && (touch.has-hover || remove-touch.has-hover) ? 1 : 0;
@@ -324,7 +362,11 @@ export component AppWindow inherits Window {
     in property <[TabInfo]> tabs;
     in property <int> active-tab;
     in property <[Row]> rows;
-    in-out property <string> path;
+    in property <string> path;
+    in property <[Crumb]> crumbs;
+    // The address bar shows folder buttons until clicked; then it is a text field.
+    private property <bool> address-editing: false;
+    private property <string> address-text;
     in property <string> status;
     in property <bool> search-mode;
     in-out property <string> search-text;
@@ -383,15 +425,21 @@ export component AppWindow inherits Window {
     callback key(KeyEvent, bool) -> bool;
 
     public function focus-list() {
+        root.address-editing = false;
+        root.address-text = root.path;
         list-focus.focus();
     }
 
     public function focus-address() {
+        root.address-editing = true;
+        root.address-text = root.path;
         address.focus();
         address.select-all();
     }
 
     public function focus-search() {
+        root.address-editing = false;
+        root.address-text = root.path;
         search-box.focus();
         search-box.select-all();
     }
@@ -583,10 +631,84 @@ export component AppWindow inherits Window {
                         root.up();
                     }
                 }
-                address := LineEdit {
-                    text <=> root.path;
-                    accepted(t) => {
-                        root.navigate(t);
+                Rectangle {
+                    horizontal-stretch: 1;
+                    height: 30px;
+                    border-radius: 6px;
+                    background: Palette.background;
+                    border-width: 1px;
+                    border-color: root.address-editing ? Palette.accent-background : Palette.foreground.transparentize(0.82);
+
+                    address := LineEdit {
+                        x: 1px;
+                        y: 1px;
+                        width: parent.width - 2px;
+                        height: parent.height - 2px;
+                        text <=> root.address-text;
+                        accepted(t) => {
+                            root.address-editing = false;
+                            root.navigate(t);
+                        }
+                        key-pressed(e) => {
+                            if e.text == Key.Escape {
+                                root.address-editing = false;
+                                root.address-text = root.path;
+                                root.focus-list();
+                                return accept;
+                            }
+                            reject
+                        }
+                        changed has-focus => {
+                            if !self.has-focus && root.address-editing {
+                                root.address-editing = false;
+                                root.address-text = root.path;
+                            }
+                        }
+                    }
+
+                    // Folder buttons; the empty area switches to typing.
+                    if !root.address-editing: Rectangle {
+                        x: 1px;
+                        y: 1px;
+                        width: parent.width - 2px;
+                        height: parent.height - 2px;
+                        border-radius: 5px;
+                        background: Palette.background;
+                        clip: true;
+
+                        TouchArea {
+                            width: 100%;
+                            height: 100%;
+                            mouse-cursor: text;
+                            clicked => {
+                                root.focus-address();
+                            }
+                        }
+
+                        HorizontalLayout {
+                            padding-left: 4px;
+                            padding-right: 4px;
+                            spacing: 0px;
+                            alignment: start;
+
+                            for c[i] in root.crumbs: HorizontalLayout {
+                                spacing: 0px;
+                                alignment: start;
+                                if i > 0: Text {
+                                    width: 14px;
+                                    text: "\\";
+                                    horizontal-alignment: center;
+                                    vertical-alignment: center;
+                                    color: root.dim;
+                                }
+                                CrumbButton {
+                                    title: c.title;
+                                    clicked => {
+                                        root.place-open(c.path);
+                                    }
+                                }
+                            }
+                        }
                     }
                 }
                 search-box := LineEdit {

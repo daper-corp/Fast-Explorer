@@ -488,7 +488,9 @@ impl App {
             return self.sync_tabs();
         }
         let ui = self.ui();
-        ui.set_path(t.cwd.borrow().display().to_string().into());
+        let cwd = t.cwd.borrow().clone();
+        ui.set_path(cwd.display().to_string().into());
+        ui.set_crumbs(ModelRc::from(Rc::new(VecModel::from(crumbs_for(&cwd)))));
         ui.set_folder(t.title().into());
         let (pos, len) = (t.hist_pos.get(), t.history.borrow().len());
         ui.set_can_back(pos > 0);
@@ -2069,6 +2071,27 @@ fn same_path(a: &Path, b: &Path) -> bool {
     norm(a) == norm(b)
 }
 
+/// Folder buttons for the address bar, from the drive down to `path`.
+fn crumbs_for(path: &Path) -> Vec<Crumb> {
+    let mut ancestors: Vec<&Path> = path.ancestors().collect();
+    ancestors.reverse();
+    ancestors
+        .into_iter()
+        .filter(|p| !p.as_os_str().is_empty())
+        .map(|p| {
+            let mut title = match p.file_name() {
+                Some(name) => name.to_string_lossy().into_owned(),
+                None => p.display().to_string(),
+            };
+            // "C:\" -> "C:", "\\server\share\" -> "\\server\share"
+            if let Some(root) = title.strip_suffix('\\') {
+                title = root.to_string();
+            }
+            Crumb { title: title.into(), path: p.display().to_string().into() }
+        })
+        .collect()
+}
+
 fn favorites_file() -> Option<PathBuf> {
     shell::roaming_appdata().ok().map(|d| d.join("Fast Explorer").join("favorites.txt"))
 }
@@ -2355,5 +2378,14 @@ mod tests {
         assert_eq!(super::content_query("Content: TODO ").as_deref(), Some("TODO"));
         assert_eq!(super::content_query("내용:"), None); // nothing to look for yet
         assert_eq!(super::content_query("notepad"), None);
+    }
+
+    #[test]
+    fn crumbs_from_the_drive_root() {
+        let crumbs = super::crumbs_for(std::path::Path::new(r"C:\Users\hp\source"));
+        let titles: Vec<String> = crumbs.iter().map(|c| c.title.to_string()).collect();
+        let paths: Vec<String> = crumbs.iter().map(|c| c.path.to_string()).collect();
+        assert_eq!(titles, ["C:", "Users", "hp", "source"]);
+        assert_eq!(paths, [r"C:\", r"C:\Users", r"C:\Users\hp", r"C:\Users\hp\source"]);
     }
 }
