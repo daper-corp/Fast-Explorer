@@ -7,6 +7,8 @@ export struct Row {
     size: string,
     selected: bool,
     editing: bool,
+    // On the clipboard after Ctrl+X, until it is pasted or replaced.
+    cut: bool,
     // UTF-8 byte length of the name without its extension (pre-selected when renaming).
     stem: int,
     // Folder of a search hit; empty when browsing a folder.
@@ -351,6 +353,7 @@ component CrumbButton inherits Rectangle {
 component PlaceRow inherits Rectangle {
     in property <Place> place;
     callback open;
+    callback open-tab;
     callback remove;
     callback history(int);
 
@@ -362,6 +365,9 @@ component PlaceRow inherits Rectangle {
         pointer-event(e) => {
             if e.kind == PointerEventKind.down && e.button == PointerEventButton.left {
                 root.open();
+            }
+            if e.kind == PointerEventKind.down && e.button == PointerEventButton.middle {
+                root.open-tab();
             }
             if e.kind == PointerEventKind.down && e.button == PointerEventButton.back {
                 root.history(-1);
@@ -419,6 +425,7 @@ component Sidebar inherits Rectangle {
     in property <string> this-pc-path;
     in property <bool> this-pc-active;
     callback open(string);
+    callback open-tab(string);
     callback add;
     callback remove(string);
     callback history(int);
@@ -484,6 +491,9 @@ component Sidebar inherits Rectangle {
                     open => {
                         root.open(p.path);
                     }
+                    open-tab => {
+                        root.open-tab(p.path);
+                    }
                     remove => {
                         root.remove(p.path);
                     }
@@ -526,6 +536,9 @@ component Sidebar inherits Rectangle {
                     open => {
                         root.open(d.path);
                     }
+                    open-tab => {
+                        root.open-tab(d.path);
+                    }
                     history(n) => {
                         root.history(n);
                     }
@@ -560,6 +573,10 @@ export component AppWindow inherits Window {
     private property <bool> address-editing: false;
     private property <string> address-text;
     in property <string> status;
+    // What the user typed for type-ahead, shown as a short toast over the list.
+    in property <string> key-hint;
+    // The current folder is in the sidebar's favorites (filled star in the toolbar).
+    in property <bool> favorite-active;
     in property <bool> search-mode;
     in-out property <string> search-text;
     // Search options, kept per tab.
@@ -616,6 +633,8 @@ export component AppWindow inherits Window {
     callback tab-select(int);
     callback tab-close(int);
     callback tab-new();
+    callback tab-move(int, int);
+    callback favorite-toggle();
     callback sort(int);
     callback row-pressed(int, KeyboardModifiers);
     callback row-clicked(int);
@@ -631,6 +650,7 @@ export component AppWindow inherits Window {
     callback delete-selected();
     callback view-changed();
     callback place-open(string);
+    callback place-open-tab(string);
     callback place-add();
     callback place-remove(string);
     callback history(int);
@@ -699,6 +719,10 @@ export component AppWindow inherits Window {
     // rubber-band selection instead of hitting a row.
     private property <length> list-margin: 6px;
     private property <brush> dim: Palette.foreground.transparentize(0.4);
+    // Tab drag-reorder state: the tab being dragged and the slot it would land in.
+    private property <int> tab-drag-from: -1;
+    private property <int> tab-drag-to: -1;
+    private property <bool> tab-dragging: false;
 
     // The mouse's back/forward buttons work anywhere nothing more specific handles them.
     TouchArea {
@@ -739,6 +763,7 @@ export component AppWindow inherits Window {
                 alignment: start;
                 for t[i] in root.tabs: Rectangle {
                     width: 200px;
+                    opacity: root.tab-dragging && root.tab-drag-from == i ? 0.45 : 1;
                     border-top-left-radius: 8px;
                     border-top-right-radius: 8px;
                     background: i == root.active-tab ? Palette.background : tab-touch.has-hover ? Palette.foreground.transparentize(0.92) : transparent;
@@ -754,6 +779,9 @@ export component AppWindow inherits Window {
                         pointer-event(e) => {
                             if e.kind == PointerEventKind.down && e.button == PointerEventButton.left {
                                 root.tab-select(i);
+                                root.tab-drag-from = i;
+                                root.tab-drag-to = -1;
+                                root.tab-dragging = false;
                             }
                             if e.kind == PointerEventKind.down && e.button == PointerEventButton.middle {
                                 root.tab-close(i);
@@ -763,6 +791,24 @@ export component AppWindow inherits Window {
                             }
                             if e.kind == PointerEventKind.down && e.button == PointerEventButton.forward {
                                 root.history(1);
+                            }
+                            if (e.kind == PointerEventKind.up || e.kind == PointerEventKind.cancel) && root.tab-drag-from == i {
+                                if root.tab-dragging && root.tab-drag-to >= 0 && root.tab-drag-to != i {
+                                    root.tab-move(i, root.tab-drag-to);
+                                }
+                                root.tab-drag-from = -1;
+                                root.tab-drag-to = -1;
+                                root.tab-dragging = false;
+                            }
+                        }
+                        moved => {
+                            if root.tab-drag-from == i {
+                                let dx = self.mouse-x - self.pressed-x;
+                                if root.tab-dragging || abs(dx) > 6px {
+                                    root.tab-dragging = true;
+                                    let target = i + round(dx / 202px);
+                                    root.tab-drag-to = min(max(target, 0), root.tabs.length - 1);
+                                }
                             }
                         }
                     }
@@ -818,6 +864,17 @@ export component AppWindow inherits Window {
                         }
                     }
                 }
+            }
+
+            // Where the dragged tab would land. Tabs are 200px wide with 2px between.
+            Rectangle {
+                visible: root.tab-dragging && root.tab-drag-to >= 0 && root.tab-drag-to != root.tab-drag-from;
+                x: 5px + (root.tab-drag-to + (root.tab-drag-to > root.tab-drag-from ? 1 : 0)) * 202px;
+                y: 8px;
+                width: 2px;
+                height: 28px;
+                border-radius: 1px;
+                background: Palette.accent-background;
             }
 
             // Custom window controls (the native title bar is gone).
@@ -880,6 +937,13 @@ export component AppWindow inherits Window {
                 RefreshButton {
                     clicked => {
                         root.refresh();
+                    }
+                }
+                ToolButton {
+                    text: root.favorite-active ? "★" : "☆";
+                    font-size: 17px;
+                    clicked => {
+                        root.favorite-toggle();
                     }
                 }
                 address-box := Rectangle {
@@ -1016,6 +1080,9 @@ export component AppWindow inherits Window {
                     this-pc-active: root.this-pc;
                     open(p) => {
                         root.place-open(p);
+                    }
+                    open-tab(p) => {
+                        root.place-open-tab(p);
                     }
                     add => {
                         root.place-add();
@@ -1181,16 +1248,17 @@ export component AppWindow inherits Window {
                                         root.rubber-start(e.modifiers.control);
                                         root.rubber-on = true;
                                     }
-                                    if e.button == PointerEventButton.right {
-                                        list-focus.focus();
-                                        root.blank-pressed(true, false);
-                                    }
                                     if e.button == PointerEventButton.back {
                                         root.history(-1);
                                     }
                                     if e.button == PointerEventButton.forward {
                                         root.history(1);
                                     }
+                                }
+                                // Right-button menus open on release (see the row handler).
+                                if e.kind == PointerEventKind.up && e.button == PointerEventButton.right {
+                                    list-focus.focus();
+                                    root.blank-pressed(true, false);
                                 }
                                 if (e.kind == PointerEventKind.up || e.kind == PointerEventKind.cancel) && root.rubber-on {
                                     root.rubber-on = false;
@@ -1217,7 +1285,9 @@ export component AppWindow inherits Window {
                                             list-focus.focus();
                                             root.row-pressed(i, e.modifiers);
                                         }
-                                        if e.kind == PointerEventKind.down && e.button == PointerEventButton.right {
+                                        // Open on release: pressing right must not leave the
+                                        // TouchArea grabbing the mouse while the menu's modal loop runs.
+                                        if e.kind == PointerEventKind.up && e.button == PointerEventButton.right {
                                             list-focus.focus();
                                             root.row-menu(i);
                                         }
@@ -1275,6 +1345,8 @@ export component AppWindow inherits Window {
                                             }
                                         }
                                     }
+                                    // Cut items wait translucent, like Explorer, until pasted.
+                                    opacity: r.cut ? 0.45 : 1;
                                     Image {
                                         width: 16px;
                                         source: r.icon;
@@ -1379,6 +1451,28 @@ export component AppWindow inherits Window {
                             border-width: 1px;
                             border-color: Palette.accent-background;
                         }
+                        }
+
+                        // Type-ahead toast: shows exactly what was typed while it jumps to a match.
+                        Rectangle {
+                            visible: root.key-hint != "";
+                            x: (parent.width - self.width) / 2;
+                            y: parent.height - 52px;
+                            width: min(parent.width - 24px, max(90px, hint-text.preferred-width + 32px));
+                            height: 32px;
+                            border-radius: 8px;
+                            background: Palette.foreground.transparentize(0.08);
+                            hint-text := Text {
+                                x: 16px;
+                                width: parent.width - 32px;
+                                height: parent.height;
+                                text: root.key-hint;
+                                font-size: 14px;
+                                color: Palette.background;
+                                horizontal-alignment: center;
+                                vertical-alignment: center;
+                                overflow: elide;
+                            }
                         }
                     }
                 }

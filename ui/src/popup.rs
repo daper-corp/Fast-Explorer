@@ -1,12 +1,27 @@
 //! Native Win32 popup menus: Fast Explorer's own commands plus the shell items from the host.
 
+use std::path::PathBuf;
+
 use fex_core::menu::MenuItem;
 use windows::Win32::Foundation::HWND;
+use windows::Win32::Graphics::Gdi::{DeleteObject, HBITMAP, HGDIOBJ};
+use windows::Win32::Storage::FileSystem::FILE_ATTRIBUTE_NORMAL;
+use windows::Win32::UI::Shell::{
+    SHFILEINFOW, SHGFI_ICON, SHGFI_SMALLICON, SHGSI_ICON, SHGSI_SMALLICON, SHGetFileInfoW, SHGetStockIconInfo,
+    SHSTOCKICONID, SHSTOCKICONINFO,
+};
 use windows::Win32::UI::WindowsAndMessaging::{
-    AppendMenuW, CreatePopupMenu, DestroyMenu, HMENU, MENU_ITEM_FLAGS, MF_GRAYED, MF_POPUP, MF_SEPARATOR,
-    MF_STRING, SetMenuDefaultItem, TPM_RETURNCMD, TPM_RIGHTBUTTON, TrackPopupMenuEx,
+    AppendMenuW, CreatePopupMenu, DestroyMenu, GetIconInfo, HMENU, ICONINFO, MENU_ITEM_FLAGS, MF_BYCOMMAND,
+    MF_GRAYED, MF_POPUP, MF_SEPARATOR, MF_STRING, SetMenuDefaultItem, SetMenuItemBitmaps, TPM_RETURNCMD,
+    TPM_RIGHTBUTTON, TrackPopupMenuEx,
 };
 use windows::core::{HSTRING, PCWSTR};
+
+/// An icon for one of our menu items: a shell stock icon, or the icon of a file/folder.
+pub enum Icon {
+    Stock(SHSTOCKICONID),
+    Path(PathBuf),
+}
 
 /// One of our own commands. Ids sit above the shell's range (1..=0x7FFF); id 0 is a separator.
 pub struct Own {
@@ -15,12 +30,13 @@ pub struct Own {
     pub label: &'static str,
     pub default: bool,
     pub disabled: bool,
+    pub icon: Option<Icon>,
 }
 
-pub const SEP: Own = Own { id: 0, label: "", default: false, disabled: false };
+pub const SEP: Own = Own { id: 0, label: "", default: false, disabled: false, icon: None };
 
 pub const fn own(id: u32, label: &'static str) -> Own {
-    Own { id, label, default: false, disabled: false }
+    Own { id, label, default: false, disabled: false, icon: None }
 }
 
 /// Verbs we already offer ourselves; hidden from the shell part to avoid duplicates.
@@ -42,17 +58,65 @@ fn plain(label: &str) -> String {
 pub fn show(hwnd: isize, at: (i32, i32), top: &[Own], items: &[MenuItem], bottom: &[Own]) -> u32 {
     unsafe {
         let Ok(menu) = CreatePopupMenu() else { return 0 };
+        let mut bitmaps = Vec::new();
         let mut root = Level { menu, pending_sep: false, count: 0 };
-        root.add_own(top);
+        root.add_own(top, &mut bitmaps);
         root.pending_sep = true;
         let seen = top.iter().chain(bottom).filter(|o| o.id != 0).map(|o| plain(o.label)).collect();
         root = add_shell(root, items, seen);
         root.pending_sep = true;
-        root.add_own(bottom);
+        root.add_own(bottom, &mut bitmaps);
         let flags = (TPM_RETURNCMD | TPM_RIGHTBUTTON).0;
         let id = TrackPopupMenuEx(menu, flags, at.0, at.1, HWND(hwnd as _), None).0 as u32;
         let _ = DestroyMenu(menu); // also destroys the submenus
+        // The menu only referenced these; it did not own them.
+        for (color, mask) in bitmaps {
+            let _ = DeleteObject(HGDIOBJ(color.0));
+            let _ = DeleteObject(HGDIOBJ(mask.0));
+        }
         id
+    }
+}
+
+/// Loads a menu icon and returns the color+mask bitmaps the menu can draw with.
+unsafe fn icon_bitmaps(icon: &Icon) -> Option<(HBITMAP, HBITMAP)> {
+    unsafe {
+        let hicon = match icon {
+            Icon::Stock(id) => {
+                let mut info =
+                    SHSTOCKICONINFO { cbSize: size_of::<SHSTOCKICONINFO>() as u32, ..Default::default() };
+                SHGetStockIconInfo(*id, SHGSI_ICON | SHGSI_SMALLICON, &mut info).ok()?;
+                info.hIcon
+            }
+            Icon::Path(path) => {
+                let mut info = SHFILEINFOW::default();
+                let path = HSTRING::from(path.as_os_str());
+                let got = SHGetFileInfoW(
+                    PCWSTR(path.as_ptr()),
+                    FILE_ATTRIBUTE_NORMAL,
+                    Some(&mut info),
+                    size_of::<SHFILEINFOW>() as u32,
+                    SHGFI_ICON | SHGFI_SMALLICON,
+                );
+                if got == 0 {
+                    return None;
+                }
+                info.hIcon
+            }
+        };
+        if hicon.is_invalid() {
+            return None;
+        }
+        let mut info = ICONINFO { fIcon: true.into(), ..Default::default() };
+        let ok = GetIconInfo(hicon, &mut info).is_ok();
+        let _ = windows::Win32::UI::WindowsAndMessaging::DestroyIcon(hicon);
+        if !ok || info.hbmColor.is_invalid() {
+            if !info.hbmMask.is_invalid() {
+                let _ = DeleteObject(HGDIOBJ(info.hbmMask.0));
+            }
+            return None;
+        }
+        Some((info.hbmColor, info.hbmMask))
     }
 }
 
@@ -76,7 +140,7 @@ impl Level {
         self.count += 1;
     }
 
-    unsafe fn add_own(&mut self, items: &[Own]) {
+    unsafe fn add_own(&mut self, items: &[Own], bitmaps: &mut Vec<(HBITMAP, HBITMAP)>) {
         for o in items {
             if o.id == 0 {
                 self.pending_sep = true;
@@ -86,6 +150,13 @@ impl Level {
                 self.append(if o.disabled { MF_GRAYED } else { MF_STRING }, o.id as usize, o.label);
                 if o.default {
                     let _ = SetMenuDefaultItem(self.menu, o.id, 0);
+                }
+                if let Some(icon) = &o.icon
+                    && let Some((color, mask)) = icon_bitmaps(icon)
+                {
+                    let usable = (!mask.is_invalid()).then_some(mask);
+                    let _ = SetMenuItemBitmaps(self.menu, o.id, MF_BYCOMMAND, Some(color), usable);
+                    bitmaps.push((color, mask));
                 }
             }
         }

@@ -6,7 +6,7 @@ use std::io;
 use std::os::windows::ffi::OsStrExt;
 use std::path::{Path, PathBuf};
 
-use windows::Win32::Foundation::{ERROR_ACCESS_DENIED, ERROR_SUCCESS, HANDLE, HGLOBAL, HWND, POINT};
+use windows::Win32::Foundation::{E_FAIL, ERROR_ACCESS_DENIED, ERROR_SUCCESS, HANDLE, HGLOBAL, HWND, POINT};
 use windows::Win32::System::Registry::{HKEY_CURRENT_USER, RRF_RT_REG_DWORD, RegGetValueW};
 use windows::Win32::Storage::FileSystem::{
     GetDiskFreeSpaceExW, GetDriveTypeW, GetLogicalDriveStringsW, GetVolumeInformationW, MOVE_FILE_FLAGS, MoveFileExW,
@@ -25,15 +25,24 @@ use windows::Win32::System::DataExchange::{
 use windows::Win32::System::Memory::{GMEM_MOVEABLE, GlobalAlloc, GlobalLock, GlobalUnlock};
 use windows::Win32::System::Ole::{CF_HDROP, CF_UNICODETEXT};
 use windows::Win32::UI::Shell::{
-    DROPFILES, DragQueryFileW, FOF_ALLOWUNDO, FOLDERID_Desktop, FOLDERID_Documents, FOLDERID_Downloads,
-    FOLDERID_Music, FOLDERID_Pictures, FOLDERID_ProgramFiles, FOLDERID_RoamingAppData, FOLDERID_Videos,
-    KF_FLAG_DEFAULT, SHGetKnownFolderPath, FOF_NO_UI, FOF_NOCONFIRMMKDIR, FOF_RENAMEONCOLLISION,
-    FOFX_ADDUNDORECORD, FileOperation, HDROP, IFileOperation, IShellItem, SEE_MASK_NOASYNC,
-    SEE_MASK_NOCLOSEPROCESS, SHCreateItemFromParsingName, SHELLEXECUTEINFOW, ShellExecuteExW,
+    BHID_SFObject, CMF_NORMAL, CMINVOKECOMMANDINFO, DROPFILES, DragQueryFileW, FOF_ALLOWUNDO, FOLDERID_Desktop,
+    FOLDERID_Documents, FOLDERID_Downloads, FOLDERID_Music, FOLDERID_Pictures, FOLDERID_ProgramFiles,
+    FOLDERID_RecycleBinFolder, FOLDERID_RoamingAppData, FOLDERID_Videos, GCS_VERBW, IContextMenu, IEnumIDList,
+    IFileOperation, IShellFolder, IShellFolder2, IShellItem, KF_FLAG_DEFAULT, SHCONTF_FOLDERS, SHCONTF_NONFOLDERS,
+    SHGDN_FORPARSING, SHGDN_INFOLDER, SHCreateItemFromParsingName, SHGetKnownFolderItem, SHGetKnownFolderPath,
+    StrRetToBufW, FOF_NO_UI, FOF_NOCONFIRMMKDIR, FOF_RENAMEONCOLLISION, FOFX_ADDUNDORECORD, FileOperation, HDROP,
+    SEE_MASK_NOASYNC, SEE_MASK_NOCLOSEPROCESS, SHELLEXECUTEINFOW, ShellExecuteExW,
 };
+use windows::Win32::UI::Shell::Common::{ITEMIDLIST, STRRET};
+use windows::Win32::UI::Shell::PropertiesSystem::PSGetPropertyKeyFromName;
+use windows::Win32::System::Variant::{VARIANT, VT_BSTR, VariantClear};
 use windows::Win32::System::Threading::{GetExitCodeProcess, INFINITE, WaitForSingleObject};
-use windows::Win32::UI::WindowsAndMessaging::{IDYES, MB_ICONQUESTION, MB_YESNO, MessageBoxW, SW_HIDE, SW_SHOWNORMAL};
-use windows::core::{HSTRING, Owned, PCWSTR, w};
+use windows::Win32::UI::WindowsAndMessaging::{
+    CreatePopupMenu, DestroyMenu, GetMenuItemCount, GetMenuItemID, IDYES, MB_ICONQUESTION, MB_YESNO, MessageBoxW,
+    SW_HIDE, SW_SHOWNORMAL,
+};
+use windows::Win32::Foundation::PROPERTYKEY;
+use windows::core::{HSTRING, Interface, Owned, PCSTR, PCWSTR, PSTR, w};
 
 pub enum Op {
     Copy(Vec<PathBuf>, PathBuf),
@@ -83,6 +92,186 @@ pub fn run(op: &Op, owner: Option<isize>) -> io::Result<bool> {
         fo.PerformOperations()?;
         Ok(!fo.GetAnyOperationsAborted()?.as_bool())
     })
+}
+
+/// An item that was sent to the Recycle Bin, kept so Ctrl+Z can put it back.
+pub struct TrashedItem {
+    pub name: String,
+    /// Folder the item was deleted from.
+    pub from: String,
+    pub dir: bool,
+}
+
+/// Restores deleted items through the Recycle Bin's own "restore" verb, so the shell also
+/// removes its bookkeeping. Returns how many items were found and restored.
+pub fn restore_deleted(items: &[TrashedItem], owner: Option<isize>) -> io::Result<usize> {
+    if items.is_empty() {
+        return Ok(0);
+    }
+    with_com(|| unsafe {
+        let bin: IShellItem = SHGetKnownFolderItem(&FOLDERID_RecycleBinFolder, KF_FLAG_DEFAULT, None)?;
+        let folder: IShellFolder = bin.BindToHandler(None, &BHID_SFObject)?;
+        let folder2: IShellFolder2 = folder.cast()?;
+        let mut key = PROPERTYKEY::default();
+        PSGetPropertyKeyFromName(w!("System.Recycle.DeletedFrom"), &mut key)?;
+
+        let mut en: Option<IEnumIDList> = None;
+        let _ = folder.EnumObjects(HWND::default(), (SHCONTF_FOLDERS.0 | SHCONTF_NONFOLDERS.0) as u32, &mut en);
+        let Some(en) = en else { return Ok(0) };
+
+        struct BinItem {
+            pidl: *mut ITEMIDLIST,
+            name: String,
+            from: String,
+        }
+        let mut found: Vec<BinItem> = Vec::new();
+        loop {
+            let mut pidls: [*mut ITEMIDLIST; 1] = [std::ptr::null_mut()];
+            let mut n = 0u32;
+            let _ = en.Next(&mut pidls, Some(&mut n));
+            if n == 0 || pidls[0].is_null() {
+                break;
+            }
+            let pidl = pidls[0];
+            let Some(name) = display_name(&folder, pidl) else {
+                CoTaskMemFree(Some(pidl as *const std::ffi::c_void));
+                continue;
+            };
+            let from = match folder2.GetDetailsEx(pidl, &key) {
+                Ok(mut v) => {
+                    let s = variant_string(&v).unwrap_or_default();
+                    let _ = VariantClear(&mut v);
+                    s
+                }
+                Err(_) => String::new(),
+            };
+            found.push(BinItem { pidl, name, from });
+        }
+
+        let mut restored = 0;
+        let mut used = vec![false; found.len()];
+        for target in items {
+            let idx = found.iter().enumerate().position(|(i, e)| {
+                if used[i]
+                    || !e.name.eq_ignore_ascii_case(&target.name)
+                    || (!e.from.is_empty() && !same_folder(&e.from, &target.from))
+                {
+                    return false;
+                }
+                // The recycle-bin folder does not set SFGAO_FOLDER on folders; the stored
+                // item's $R path does. If it cannot be read, name+folder is already unique.
+                match parsing_name(&folder, e.pidl as *const _).and_then(|p| std::fs::metadata(p).ok()) {
+                    Some(md) => md.is_dir() == target.dir,
+                    None => true,
+                }
+            });
+            if let Some(i) = idx {
+                used[i] = true;
+                if restore_bin_item(&folder, found[i].pidl, owner).is_ok() {
+                    restored += 1;
+                }
+            }
+        }
+        for e in &found {
+            CoTaskMemFree(Some(e.pidl as *const std::ffi::c_void));
+        }
+        Ok(restored)
+    })
+}
+
+fn same_folder(a: &str, b: &str) -> bool {
+    let norm = |s: &str| s.trim_end_matches(|c| c == '\\' || c == '/').to_lowercase();
+    norm(a) == norm(b)
+}
+
+unsafe fn display_name(folder: &IShellFolder, pidl: *const ITEMIDLIST) -> Option<String> {
+    unsafe {
+        let mut ret = STRRET::default();
+        folder.GetDisplayNameOf(pidl, SHGDN_INFOLDER, &mut ret).ok()?;
+        let mut buf = [0u16; 260];
+        StrRetToBufW(&mut ret, Some(pidl), &mut buf).ok()?;
+        let n = buf.iter().position(|&c| c == 0).unwrap_or(buf.len());
+        Some(String::from_utf16_lossy(&buf[..n]))
+    }
+}
+
+/// The recycle-bin item's backing path (e.g. `C:\$Recycle.Bin\S-1-5-…\$R123456`).
+unsafe fn parsing_name(folder: &IShellFolder, pidl: *const ITEMIDLIST) -> Option<String> {
+    unsafe {
+        let mut ret = STRRET::default();
+        folder.GetDisplayNameOf(pidl, SHGDN_FORPARSING, &mut ret).ok()?;
+        let mut buf = [0u16; 1024];
+        StrRetToBufW(&mut ret, Some(pidl), &mut buf).ok()?;
+        let n = buf.iter().position(|&c| c == 0).unwrap_or(buf.len());
+        Some(String::from_utf16_lossy(&buf[..n]))
+    }
+}
+
+unsafe fn variant_string(v: &VARIANT) -> Option<String> {
+    unsafe {
+        let inner = &v.Anonymous.Anonymous;
+        (inner.vt == VT_BSTR).then(|| inner.Anonymous.bstrVal.to_string())
+    }
+}
+
+/// Invokes the item's Recycle Bin "restore" command. The canonical verb is "undelete";
+/// if the shell does not expose it, the first command (Restore in Explorer's menu) is used.
+unsafe fn restore_bin_item(
+    folder: &IShellFolder,
+    pidl: *mut ITEMIDLIST,
+    owner: Option<isize>,
+) -> windows::core::Result<()> {
+    unsafe {
+        let ctx: IContextMenu = folder.GetUIObjectOf(HWND::default(), &[pidl as *const _], None)?;
+        let menu = CreatePopupMenu()?;
+        let hr = ctx.QueryContextMenu(menu, 0, 1, 0x7FFF, CMF_NORMAL);
+        if hr.is_err() {
+            let _ = DestroyMenu(menu);
+            return Err(hr.into());
+        }
+        let count = GetMenuItemCount(Some(menu));
+        let (mut first, mut restore) = (0u32, 0u32);
+        for pos in 0..count {
+            let id = GetMenuItemID(menu, pos);
+            if id == 0 || id == u32::MAX {
+                continue;
+            }
+            if first == 0 {
+                first = id;
+            }
+            let mut buf = [0u16; 64];
+            let name = PSTR(buf.as_mut_ptr() as *mut u8);
+            if ctx.GetCommandString(id as usize, GCS_VERBW, None, name, buf.len() as u32).is_ok() {
+                let len = buf.iter().position(|&c| c == 0).unwrap_or(buf.len());
+                if String::from_utf16_lossy(&buf[..len]).eq_ignore_ascii_case("undelete") {
+                    restore = id;
+                    break;
+                }
+            }
+        }
+        if restore == 0 {
+            restore = first;
+        }
+        if restore == 0 {
+            let _ = DestroyMenu(menu);
+            return Err(windows::core::Error::from(E_FAIL));
+        }
+        let info = CMINVOKECOMMANDINFO {
+            cbSize: size_of::<CMINVOKECOMMANDINFO>() as u32,
+            fMask: 0,
+            hwnd: owner.map_or(HWND::default(), |h| HWND(h as _)),
+            // QueryContextMenu numbered commands from 1; InvokeCommand wants the offset.
+            lpVerb: PCSTR(restore.saturating_sub(1) as usize as *const u8),
+            lpParameters: PCSTR::null(),
+            lpDirectory: PCSTR::null(),
+            nShow: SW_SHOWNORMAL.0,
+            dwHotKey: 0,
+            hIcon: HANDLE::default(),
+        };
+        let r = ctx.InvokeCommand(&info);
+        let _ = DestroyMenu(menu);
+        r
+    }
 }
 
 /// Renames within the same folder. Tries MoveFileExW first (~1 ms, versus ~150 ms for
@@ -475,6 +664,39 @@ mod tests {
 
         assert!(run(&Op::Delete { paths: vec![b.clone()], permanent: true }, None).unwrap());
         assert!(!b.exists());
+        fs::remove_dir_all(&root).unwrap();
+    }
+
+    #[test]
+    fn recycle_restore_round_trip() {
+        let root = std::env::temp_dir().join(format!("fex-undo-{}", std::process::id()));
+        let _ = fs::remove_dir_all(&root);
+        fs::create_dir_all(&root).unwrap();
+        let file = root.join("recycle-round-trip.txt");
+        fs::write(&file, "undo me").unwrap();
+        let item = TrashedItem {
+            name: file.file_name().unwrap().to_string_lossy().into_owned(),
+            from: root.display().to_string(),
+            dir: false,
+        };
+
+        assert!(run(&Op::Delete { paths: vec![file.clone()], permanent: false }, None).unwrap());
+        assert!(!file.exists());
+        assert_eq!(restore_deleted(&[item], None).unwrap(), 1);
+        assert_eq!(fs::read_to_string(&file).unwrap(), "undo me");
+
+        let folder = root.join("recycle-round-trip-folder");
+        fs::create_dir_all(&folder).unwrap();
+        fs::write(folder.join("inner.txt"), "inner").unwrap();
+        let item = TrashedItem {
+            name: folder.file_name().unwrap().to_string_lossy().into_owned(),
+            from: root.display().to_string(),
+            dir: true,
+        };
+        assert!(run(&Op::Delete { paths: vec![folder.clone()], permanent: false }, None).unwrap());
+        assert!(!folder.exists());
+        assert_eq!(restore_deleted(&[item], None).unwrap(), 1);
+        assert_eq!(fs::read_to_string(folder.join("inner.txt")).unwrap(), "inner");
         fs::remove_dir_all(&root).unwrap();
     }
 

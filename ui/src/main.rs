@@ -30,7 +30,10 @@ use windows::Win32::Graphics::Gdi::{
 };
 use windows::Win32::UI::Controls::MARGINS;
 use windows::Win32::UI::Input::KeyboardAndMouse::{GetAsyncKeyState, VK_LBUTTON};
-use windows::Win32::UI::Shell::{DefSubclassProc, SetWindowSubclass};
+use windows::Win32::UI::Shell::{
+    DefSubclassProc, SetWindowSubclass, SIID_DELETE, SIID_DOCNOASSOC, SIID_FOLDER, SIID_LINK, SIID_RENAME,
+    SIID_SETTINGS,
+};
 use windows::Win32::UI::WindowsAndMessaging::{
     AllowSetForegroundWindow, GetClientRect, GetCursorPos, GetWindowRect, HTBOTTOM, HTBOTTOMLEFT, HTBOTTOMRIGHT, HTLEFT, HTRIGHT,
     HTTOP, HTTOPLEFT, HTTOPRIGHT, IsZoomed, PostMessageW, WM_CLOSE, WM_DEVICECHANGE, WM_NCHITTEST, WM_SIZE,
@@ -40,6 +43,11 @@ use windows::Win32::UI::WindowsAndMessaging::{
 mod dnd;
 mod popup;
 mod tree;
+
+/// Gives one of our menu commands an icon.
+fn with_icon(o: Own, icon: popup::Icon) -> Own {
+    Own { icon: Some(icon), ..o }
+}
 
 slint::include_modules!();
 
@@ -145,6 +153,32 @@ struct Rows {
 static SHOW_HIDDEN: AtomicBool = AtomicBool::new(false);
 static SHOW_EXT: AtomicBool = AtomicBool::new(true);
 
+// Paths on the clipboard after Ctrl+X. Explorer shows them translucent until pasted.
+thread_local! {
+    static CUT: RefCell<HashSet<String>> = RefCell::new(HashSet::new());
+}
+
+/// Case-insensitive identity for the cut set (Windows paths, trailing separator ignored).
+fn path_key(p: &Path) -> String {
+    p.to_string_lossy().trim_end_matches(|c| c == '\\' || c == '/').to_lowercase()
+}
+
+fn is_cut(p: &Path) -> bool {
+    CUT.with(|c| c.borrow().contains(&path_key(p)))
+}
+
+fn set_cut(paths: &[PathBuf]) {
+    CUT.with(|c| {
+        let mut c = c.borrow_mut();
+        c.clear();
+        c.extend(paths.iter().map(|p| path_key(p)));
+    });
+}
+
+fn clear_cut() {
+    CUT.with(|c| c.borrow_mut().clear());
+}
+
 impl Model for Rows {
     type Data = Row;
 
@@ -162,12 +196,18 @@ impl Model for Rows {
             Some(p) if p > 0 && !e.is_dir() => p,
             _ => name.len(),
         };
-        let icon = match self.paths.borrow().get(i as usize) {
-            Some(path) => icon_image(IconKey::File(PathBuf::from(path))),
-            None => icon_image(IconKey::for_entry(e.is_dir(), &ext, || match self.locations.borrow().get(i as usize) {
+        let virtual_path = self.paths.borrow().get(i as usize).cloned();
+        let path = match virtual_path {
+            Some(path) => PathBuf::from(path),
+            None => match self.locations.borrow().get(i as usize) {
                 Some(dir) => PathBuf::from(dir).join(e.os_name()),
                 None => self.base.borrow().join(e.os_name()),
-            })),
+            },
+        };
+        let cut = is_cut(&path);
+        let icon = match self.paths.borrow().get(i as usize) {
+            Some(_) => icon_image(IconKey::File(path.clone())),
+            None => icon_image(IconKey::for_entry(e.is_dir(), &ext, || path.clone())),
         };
         let date = match self.dates.borrow().get(i as usize).filter(|s| !s.is_empty()) {
             Some(s) => s.clone(),
@@ -189,6 +229,7 @@ impl Model for Rows {
             size: size.into(),
             selected: self.selected.borrow()[i as usize],
             editing: self.editing.get() == Some(i),
+            cut,
             stem: stem as i32,
             name: name.into(),
             location: self.locations.borrow().get(i as usize).map(|s| s.as_str().into()).unwrap_or_default(),
@@ -368,6 +409,24 @@ fn record_history(t: &Tab, path: &Path, hist: Hist) {
     }
 }
 
+/// Type-ahead prefix: the lowercased text used for matching and the exact text typed.
+#[derive(Default)]
+struct TypeAhead {
+    lower: String,
+    typed: String,
+    at: Option<Instant>,
+}
+
+/// One file operation that Ctrl+Z can invert, newest last.
+enum Undo {
+    Create(PathBuf),
+    Rename { from: PathBuf, to: PathBuf },
+    /// `(original path, current path)` after a cut/paste or drag move.
+    Move { pairs: Vec<(PathBuf, PathBuf)> },
+    Copy { created: Vec<PathBuf> },
+    Delete { items: Vec<shell::TrashedItem> },
+}
+
 /// Applied once the next listing of a tab is ready.
 #[derive(Default)]
 struct After {
@@ -511,7 +570,10 @@ struct App {
     tab_model: Rc<VecModel<TabInfo>>,
     active: Cell<usize>,
     next_id: Cell<u64>,
-    typeahead: RefCell<(String, Option<Instant>)>,
+    typeahead: RefCell<TypeAhead>,
+    /// Bumped per type-ahead hint so an older hide timer does not clear a newer hint.
+    hint_seq: Cell<u64>,
+    undo: RefCell<Vec<Undo>>,
     /// Shell context menus come from the separate fex-shell-host process.
     host: Arc<MenuHost>,
     menu_seq: Cell<u64>,
@@ -657,6 +719,33 @@ impl App {
         }
     }
 
+    /// Drag-and-drop tab reorder: moves the tab at `from` to index `to`.
+    fn move_tab(&self, from: usize, to: usize) {
+        let n = self.tabs.borrow().len();
+        if from >= n || to >= n || from == to {
+            return;
+        }
+        {
+            let mut tabs = self.tabs.borrow_mut();
+            let tab = tabs.remove(from);
+            tabs.insert(to, tab);
+        }
+        // The active tab keeps its rows model; only its index in the strip changes.
+        let active = self.active.get();
+        let active = if active == from {
+            to
+        } else if from < active && active <= to {
+            active - 1
+        } else if to <= active && active < from {
+            active + 1
+        } else {
+            active
+        };
+        self.active.set(active);
+        self.ui().set_active_tab(active as i32);
+        self.sync_tabs();
+    }
+
     fn cycle_tab(&self, back: bool) {
         let n = self.tabs.borrow().len();
         let i = self.active.get();
@@ -706,6 +795,7 @@ impl App {
     fn sync_places(&self) {
         let Some(ui) = self.ui.upgrade() else { return };
         let cwd = self.tab().cwd.borrow().clone();
+        ui.set_favorite_active(self.favorites.borrow().iter().any(|p| same_path(p, &cwd)));
         let favorites: Vec<Place> = self.favorites.borrow().iter().map(|p| self.place(p, &cwd, true)).collect();
         let drives: Vec<Place> =
             self.drives.borrow().iter().map(|d| self.place_drive(d, &cwd)).collect();
@@ -753,9 +843,36 @@ impl App {
         self.ui().invoke_focus_list();
     }
 
+    /// Sidebar middle-click: open the place in its own tab.
+    fn open_place_in_tab(&self, path: &str) {
+        self.new_tab(PathBuf::from(path));
+    }
+
     fn add_favorite(&self) {
         let cwd = self.tab().cwd.borrow().clone();
         self.add_favorite_path(cwd);
+    }
+
+    /// Toolbar star: add the folder shown, or remove it if it is already a favorite.
+    fn toggle_favorite(&self) {
+        let cwd = self.tab().cwd.borrow().clone();
+        if cwd.as_os_str().is_empty() || is_this_pc(&cwd) {
+            return;
+        }
+        let mut favorites = self.favorites.borrow_mut();
+        if let Some(i) = favorites.iter().position(|p| same_path(p, &cwd)) {
+            favorites.remove(i);
+            save_favorites(&favorites);
+            drop(favorites);
+            self.sync_places();
+            self.set_note(&self.tab(), "즐겨찾기에서 제거함".into());
+        } else {
+            favorites.push(cwd);
+            save_favorites(&favorites);
+            drop(favorites);
+            self.sync_places();
+            self.set_note(&self.tab(), "즐겨찾기에 추가함".into());
+        }
     }
 
     fn add_favorite_path(&self, path: PathBuf) {
@@ -1477,15 +1594,18 @@ impl App {
 
     fn type_ahead(&self, t: &Tab, text: &str) {
         let now = Instant::now();
-        let prefix = {
+        let (prefix, typed) = {
             let mut ta = self.typeahead.borrow_mut();
-            if ta.1.is_none_or(|last| now - last > Duration::from_secs(1)) {
-                ta.0.clear();
+            if ta.at.is_none_or(|last| now - last > Duration::from_secs(1)) {
+                ta.lower.clear();
+                ta.typed.clear();
             }
-            ta.0 += &text.to_lowercase();
-            ta.1 = Some(now);
-            ta.0.clone()
+            ta.lower += &text.to_lowercase();
+            ta.typed += text;
+            ta.at = Some(now);
+            (ta.lower.clone(), ta.typed.clone())
         };
+        self.show_key_hint(typed);
         let n = t.rows.len();
         let cur = self.cursor_row(t).unwrap_or(n.saturating_sub(1));
         // A single repeated letter cycles through matches, like Explorer.
@@ -1496,6 +1616,20 @@ impl App {
         if let Some(r) = hit {
             self.move_cursor(t, r, false, false);
         }
+    }
+
+    /// Shows the type-ahead text in the list toast, then hides it after a pause.
+    fn show_key_hint(&self, text: String) {
+        let seq = self.hint_seq.get() + 1;
+        self.hint_seq.set(seq);
+        self.ui().set_key_hint(text.into());
+        slint::Timer::single_shot(Duration::from_millis(1400), move || {
+            app(|a| {
+                if a.hint_seq.get() == seq {
+                    a.ui().set_key_hint("".into());
+                }
+            })
+        });
     }
 
     // ---------- keyboard ----------
@@ -1547,6 +1681,7 @@ impl App {
             _ if ctrl && ch == 'c' => self.copy(false),
             _ if ctrl && ch == 'x' => self.copy(true),
             _ if ctrl && ch == 'v' => self.paste(),
+            _ if ctrl && ch == 'z' && in_list => self.undo(),
             _ if is(Key::Delete) => self.delete(shift),
             _ if is(Key::F2) => self.start_rename(),
             _ if ctrl && ch == ' ' => {
@@ -2316,12 +2451,12 @@ impl App {
         let mut top = if background {
             vec![
                 Own { disabled: !shell::clipboard_has_files(), ..own(CMD_PASTE, "붙여넣기\tCtrl+V") },
-                own(CMD_NEW_FOLDER, "새 폴더\tCtrl+Shift+N"),
-                own(CMD_NEW_FILE, "새 텍스트 문서"),
+                with_icon(own(CMD_NEW_FOLDER, "새 폴더\tCtrl+Shift+N"), popup::Icon::Stock(SIID_FOLDER)),
+                with_icon(own(CMD_NEW_FILE, "새 텍스트 문서"), popup::Icon::Stock(SIID_DOCNOASSOC)),
                 own(CMD_REFRESH, "새로 고침\tF5"),
                 SEP,
                 own(CMD_SEARCH_HERE, "이 폴더에서 검색"),
-                own(CMD_ADD_FAVORITE, "즐겨찾기에 추가"),
+                with_icon(own(CMD_ADD_FAVORITE, "즐겨찾기에 추가"), popup::Icon::Stock(SIID_LINK)),
             ]
         } else if at_this_pc(&t) {
             vec![
@@ -2340,13 +2475,14 @@ impl App {
                 .borrow()
                 .as_ref()
                 .is_some_and(|s| sel.iter().any(|&i| !s.tree.is_hit(i)));
-            let mut v = vec![Own { default: true, ..own(CMD_OPEN, "열기\tEnter") }];
+            let item_icon = popup::Icon::Path(paths[0].clone());
+            let mut v = vec![with_icon(Own { default: true, ..own(CMD_OPEN, "열기\tEnter") }, item_icon)];
             if let [i] = sel[..]
                 && t.rows.is_dir(i)
             {
-                v.push(own(CMD_OPEN_TAB, "새 탭에서 열기"));
+                v.push(with_icon(own(CMD_OPEN_TAB, "새 탭에서 열기"), popup::Icon::Path(paths[0].clone())));
                 v.push(own(CMD_SEARCH_HERE, "이 폴더에서 검색"));
-                v.push(own(CMD_ADD_FAVORITE, "즐겨찾기에 추가"));
+                v.push(with_icon(own(CMD_ADD_FAVORITE, "즐겨찾기에 추가"), popup::Icon::Stock(SIID_LINK)));
             }
             v.extend([
                 SEP,
@@ -2355,7 +2491,11 @@ impl App {
                 own(CMD_COPY_PATH, "경로 복사\tCtrl+Shift+C"),
             ]);
             if !structural {
-                v.extend([SEP, own(CMD_RENAME, "이름 바꾸기\tF2"), own(CMD_DELETE, "삭제\tDel")]);
+                v.extend([
+                    SEP,
+                    with_icon(own(CMD_RENAME, "이름 바꾸기\tF2"), popup::Icon::Stock(SIID_RENAME)),
+                    with_icon(own(CMD_DELETE, "삭제\tDel"), popup::Icon::Stock(SIID_DELETE)),
+                ]);
             }
             v
         };
@@ -2372,7 +2512,7 @@ impl App {
             }
             (Err(e), _) => self.set_note(&t, e.clone()),
         }
-        let bottom = [own(CMD_PROPERTIES, "속성\tAlt+Enter")];
+        let bottom = [with_icon(own(CMD_PROPERTIES, "속성\tAlt+Enter"), popup::Icon::Stock(SIID_SETTINGS))];
 
         let id = popup::show(self.hwnd(), at, &top, items, &bottom);
         self.end_menu_pointer();
@@ -2516,10 +2656,25 @@ impl App {
             return;
         }
         let note = match shell::clipboard_set(&paths, cut, self.hwnd()) {
-            Ok(()) => format!("{}개 {}", paths.len(), if cut { "잘라냄" } else { "복사함" }),
+            Ok(()) => {
+                if cut {
+                    set_cut(&paths);
+                } else {
+                    clear_cut();
+                }
+                self.refresh_cut();
+                format!("{}개 {}", paths.len(), if cut { "잘라냄" } else { "복사함" })
+            }
             Err(e) => format!("클립보드 실패: {e}"),
         };
         self.set_note(&t, note);
+    }
+
+    /// Repaints every tab so cut items gain or lose their translucent look.
+    fn refresh_cut(&self) {
+        for t in self.tabs.borrow().iter() {
+            t.rows.notify.reset();
+        }
     }
 
     fn paste(&self) {
@@ -2534,13 +2689,27 @@ impl App {
         };
         let names = src.iter().filter_map(|p| p.file_name()).map(|n| n.to_string_lossy().into_owned()).collect();
         let dst = t.cwd.borrow().clone();
-        let op = if cut { Op::Move(src, dst) } else { Op::Copy(src, dst) };
-        self.run_op(&t, After { select: names, ..Default::default() }, move |hwnd| {
+        let op = if cut { Op::Move(src.clone(), dst.clone()) } else { Op::Copy(src.clone(), dst.clone()) };
+        self.run_op(&t, After { select: names, ..Default::default() }, cut, move |hwnd| {
+            let before = dir_entries(&dst);
             let r = shell::run(&op, Some(hwnd));
             if cut && matches!(r, Ok(true)) {
                 shell::clipboard_clear(hwnd);
             }
-            r
+            match r {
+                Ok(true) => {
+                    let created: Vec<PathBuf> =
+                        dir_entries(&dst).difference(&before).map(|n| dst.join(n)).collect();
+                    let undo = if cut {
+                        Undo::Move { pairs: pair_moves(&src, &created) }
+                    } else {
+                        Undo::Copy { created }
+                    };
+                    Ok((true, Some(undo)))
+                }
+                Ok(false) => Ok((false, None)),
+                Err(e) => Err(e),
+            }
         });
     }
 
@@ -2564,10 +2733,15 @@ impl App {
             return self.set_note(&t, "폴더 구조 행은 삭제할 수 없음".into());
         }
         let paths = self.selected_paths(&t);
-        if !paths.is_empty() {
-            // The shell asks for confirmation itself on a permanent delete, like Explorer.
-            self.run_op(&t, After::default(), move |hwnd| shell::run(&Op::Delete { paths, permanent }, Some(hwnd)));
+        if paths.is_empty() {
+            return;
         }
+        // The shell asks for confirmation itself on a permanent delete, like Explorer.
+        self.run_op(&t, After::default(), false, move |hwnd| {
+            let items = trash_items(&paths);
+            let ok = shell::run(&Op::Delete { paths, permanent }, Some(hwnd))?;
+            Ok((ok, (!permanent && ok).then_some(Undo::Delete { items })))
+        });
     }
 
     fn start_rename(&self) {
@@ -2597,9 +2771,13 @@ impl App {
             new = format!("{new}.{ext}");
         }
         if commit && !new.is_empty() && new != old {
-            let path = t.path_of(idx);
+            let from = t.path_of(idx);
+            let to = from.with_file_name(&new);
             let after = After { select: vec![new.clone()], ..Default::default() };
-            self.run_op(&t, after, move |hwnd| shell::rename(&path, &new, Some(hwnd)));
+            self.run_op(&t, after, false, move |hwnd| {
+                let ok = shell::rename(&from, &new, Some(hwnd))?;
+                Ok((ok, ok.then_some(Undo::Rename { from: from.clone(), to })))
+            });
         }
     }
 
@@ -2622,12 +2800,16 @@ impl App {
         }
         self.ui().invoke_focus_list();
         let (id, dir) = (t.id, t.cwd.borrow().clone());
+        let path_dir = dir.clone();
         thread::spawn(move || {
             let r = create(&dir);
             post(move |a| {
                 let Some(t) = a.find(id) else { return };
                 match r {
-                    Ok(name) => a.reload(&t, After { select: vec![name], rename: true, ..Default::default() }),
+                    Ok(name) => {
+                        a.push_undo(Undo::Create(path_dir.join(&name)));
+                        a.reload(&t, After { select: vec![name], rename: true, ..Default::default() });
+                    }
                     Err(e) => a.set_note(&t, format!("만들 수 없음: {e}")),
                 }
             });
@@ -2719,9 +2901,22 @@ impl App {
         let t = self.tab();
         let id = t.id;
         let hwnd = self.hwnd();
-        let op = if move_ { Op::Move(files, target) } else { Op::Copy(files, target) };
+        let op = if move_ { Op::Move(files.clone(), target.clone()) } else { Op::Copy(files.clone(), target.clone()) };
         thread::spawn(move || {
+            let before = dir_entries(&target);
             let r = shell::run(&op, Some(hwnd));
+            let undo = match &r {
+                Ok(true) => {
+                    let created: Vec<PathBuf> =
+                        dir_entries(&target).difference(&before).map(|n| target.join(n)).collect();
+                    Some(if move_ {
+                        Undo::Move { pairs: pair_moves(&files, &created) }
+                    } else {
+                        Undo::Copy { created }
+                    })
+                }
+                _ => None,
+            };
             let note = match &r {
                 Ok(true) => String::new(),
                 Ok(false) => "취소됨".into(),
@@ -2729,6 +2924,9 @@ impl App {
             };
             post(move |a| {
                 if let Some(t) = a.find(id) {
+                    if let Some(u) = undo {
+                        a.push_undo(u);
+                    }
                     a.set_note(&t, note);
                     a.reload(&t, After::default());
                 }
@@ -2737,22 +2935,153 @@ impl App {
     }
 
     /// Runs a file operation on a worker (it may show dialogs), then refreshes the tab.
-    /// `job` gets the owner window and returns `Ok(false)` when the user cancelled.
-    fn run_op(&self, t: &Tab, after: After, job: impl FnOnce(isize) -> io::Result<bool> + Send + 'static) {
+    /// `job` gets the owner window and returns `Ok((done, undo))`; `done` is false on cancel.
+    fn run_op(
+        &self,
+        t: &Tab,
+        after: After,
+        cut_paste: bool,
+        job: impl FnOnce(isize) -> io::Result<(bool, Option<Undo>)> + Send + 'static,
+    ) {
         let (id, hwnd) = (t.id, self.hwnd());
         thread::spawn(move || {
             let r = job(hwnd);
             post(move |a| {
                 let Some(t) = a.find(id) else { return };
-                *t.note.borrow_mut() = match r {
-                    Ok(true) => String::new(),
-                    Ok(false) => "취소됨".into(),
-                    Err(e) => format!("실패: {e}"),
-                };
+                match r {
+                    Ok((true, undo)) => {
+                        if let Some(u) = undo {
+                            a.push_undo(u);
+                        }
+                        if cut_paste {
+                            clear_cut();
+                            a.refresh_cut();
+                        }
+                        *t.note.borrow_mut() = String::new();
+                    }
+                    Ok((false, _)) => *t.note.borrow_mut() = "취소됨".into(),
+                    Err(e) => *t.note.borrow_mut() = format!("실패: {e}"),
+                }
                 a.reload(&t, after);
             });
         });
     }
+
+    fn push_undo(&self, u: Undo) {
+        let mut undo = self.undo.borrow_mut();
+        undo.push(u);
+        if undo.len() > 50 {
+            undo.remove(0);
+        }
+    }
+
+    /// Ctrl+Z: runs the inverse of the most recent tracked operation.
+    fn undo(&self) {
+        let Some(u) = self.undo.borrow_mut().pop() else {
+            return self.set_note(&self.tab(), "되돌릴 작업 없음".into());
+        };
+        let t = self.tab();
+        let (id, hwnd) = (t.id, self.hwnd());
+        thread::spawn(move || {
+            let r: io::Result<bool> = (|| {
+                match u {
+                    Undo::Create(path) => {
+                        shell::run(&Op::Delete { paths: vec![path], permanent: false }, Some(hwnd))
+                    }
+                    Undo::Copy { created } => {
+                        shell::run(&Op::Delete { paths: created, permanent: false }, Some(hwnd))
+                    }
+                    Undo::Rename { from, to } => {
+                        let name =
+                            from.file_name().map(|n| n.to_string_lossy().into_owned()).unwrap_or_default();
+                        shell::rename(&to, &name, Some(hwnd))
+                    }
+                    Undo::Move { pairs } => {
+                        let mut by_parent: HashMap<PathBuf, Vec<PathBuf>> = HashMap::new();
+                        for (from, now) in pairs {
+                            if let Some(parent) = from.parent() {
+                                by_parent.entry(parent.to_path_buf()).or_default().push(now);
+                            }
+                        }
+                        let mut ok = true;
+                        for (parent, paths) in by_parent {
+                            ok &= shell::run(&Op::Move(paths, parent), Some(hwnd))?;
+                        }
+                        Ok(ok)
+                    }
+                    Undo::Delete { items } => {
+                        let n = shell::restore_deleted(&items, Some(hwnd))?;
+                        if n == 0 {
+                            Err(io::Error::new(io::ErrorKind::NotFound, "휴지통에서 찾을 수 없음"))
+                        } else {
+                            Ok(true)
+                        }
+                    }
+                }
+            })();
+            post(move |a| {
+                let Some(t) = a.find(id) else { return };
+                match r {
+                    Ok(true) => {
+                        a.set_note(&t, "되돌림".into());
+                        a.reload(&t, After::default());
+                    }
+                    Ok(false) => a.set_note(&t, "되돌리기 취소됨".into()),
+                    Err(e) => a.set_note(&t, format!("되돌릴 수 없음: {e}")),
+                }
+            });
+        });
+    }
+}
+
+/// Names directly inside `dir`, used to see what an operation actually created.
+fn dir_entries(dir: &Path) -> HashSet<PathBuf> {
+    std::fs::read_dir(dir)
+        .map(|rd| rd.flatten().map(|e| PathBuf::from(e.file_name())).collect())
+        .unwrap_or_default()
+}
+
+/// Pairs original paths with the items an operation created. Conflict renames ("name - 복사본")
+/// cannot be matched by name, so equal leftovers are paired in order.
+fn pair_moves(src: &[PathBuf], created: &[PathBuf]) -> Vec<(PathBuf, PathBuf)> {
+    let mut used = vec![false; created.len()];
+    let mut pairs = Vec::new();
+    let mut unmatched = Vec::new();
+    for s in src {
+        let hit = s.file_name().and_then(|name| {
+            let name = name.to_string_lossy();
+            created.iter().enumerate().position(|(i, c)| {
+                !used[i] && c.file_name().is_some_and(|n| n.to_string_lossy().eq_ignore_ascii_case(&name))
+            })
+        });
+        match hit {
+            Some(i) => {
+                used[i] = true;
+                pairs.push((s.clone(), created[i].clone()));
+            }
+            None => unmatched.push(s.clone()),
+        }
+    }
+    let rest: Vec<PathBuf> = created.iter().enumerate().filter(|(i, _)| !used[*i]).map(|(_, p)| p.clone()).collect();
+    if unmatched.len() == rest.len() {
+        pairs.extend(unmatched.into_iter().zip(rest));
+    }
+    pairs
+}
+
+/// What the Recycle Bin needs to find these items again for Ctrl+Z.
+fn trash_items(paths: &[PathBuf]) -> Vec<shell::TrashedItem> {
+    paths
+        .iter()
+        .map(|p| {
+            let md = std::fs::symlink_metadata(p).ok();
+            shell::TrashedItem {
+                name: p.file_name().map(|n| n.to_string_lossy().into_owned()).unwrap_or_default(),
+                from: p.parent().map(|d| d.display().to_string()).unwrap_or_default(),
+                dir: md.is_some_and(|m| m.is_dir()),
+            }
+        })
+        .collect()
 }
 
 fn shown(e: &Entry) -> bool {
@@ -3443,6 +3772,8 @@ fn main() -> Result<(), slint::PlatformError> {
             active: Cell::new(0),
             next_id: Cell::new(0),
             typeahead: RefCell::default(),
+            hint_seq: Cell::new(0),
+            undo: RefCell::default(),
             host,
             menu_seq: Cell::new(0),
             prefetched: RefCell::default(),
@@ -3483,6 +3814,8 @@ fn main() -> Result<(), slint::PlatformError> {
     ui.on_tab_select(|i| app(|a| a.select_tab(i as usize, true)));
     ui.on_tab_close(|i| app(|a| a.close_tab(i as usize)));
     ui.on_tab_new(|| app(|a| a.new_tab(a.tab().cwd.borrow().clone())));
+    ui.on_tab_move(|from, to| app(|a| a.move_tab(from as usize, to as usize)));
+    ui.on_favorite_toggle(|| app(|a| a.toggle_favorite()));
     ui.on_sort(|c| app(|a| a.sort(c as usize)));
     ui.on_row_pressed(|r, m| app(|a| a.row_pressed(r as usize, m.control, m.shift)));
     ui.on_row_clicked(|r| app(|a| a.row_clicked(r as usize)));
@@ -3501,6 +3834,7 @@ fn main() -> Result<(), slint::PlatformError> {
     ui.on_row_hover(|r| app(|a| a.row_hover(r as usize)));
     ui.on_blank_pressed(|right, ctrl| app(|a| a.blank_pressed(right, ctrl)));
     ui.on_place_open(|p| app(|a| a.open_place(&p)));
+    ui.on_place_open_tab(|p| app(|a| a.open_place_in_tab(&p)));
     ui.on_place_add(|| app(|a| a.add_favorite()));
     ui.on_place_remove(|p| app(|a| a.remove_favorite(&p)));
     ui.on_history(|d| app(|a| if d < 0 { a.back() } else { a.forward() }));
