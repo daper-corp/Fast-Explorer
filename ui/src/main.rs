@@ -1887,11 +1887,12 @@ impl App {
         });
     }
 
-    /// "숨긴 항목" / "파일 확장명" toggled: re-filter and redraw every tab.
+    /// "숨긴 항목" / "파일 확장명" toggled: remember the choice, re-filter and redraw every tab.
     fn view_changed(&self) {
         let ui = self.ui();
         SHOW_HIDDEN.store(ui.get_show_hidden(), Relaxed);
         SHOW_EXT.store(ui.get_show_ext(), Relaxed);
+        save_view();
         for t in self.tabs.borrow().iter() {
             self.resort(t);
         }
@@ -2203,6 +2204,41 @@ fn favorites_file() -> Option<PathBuf> {
     shell::roaming_appdata().ok().map(|d| d.join("Fast Explorer").join("favorites.txt"))
 }
 
+fn view_file() -> Option<PathBuf> {
+    shell::roaming_appdata().ok().map(|d| d.join("Fast Explorer").join("view.txt"))
+}
+
+/// The view options saved by the last session. The first run takes Explorer's own settings.
+fn load_view() -> (bool, bool) {
+    let (mut hidden, mut ext) = shell::explorer_view();
+    let Some(text) = view_file().and_then(|f| std::fs::read_to_string(f).ok()) else {
+        return (hidden, ext);
+    };
+    for line in text.lines() {
+        let Some((key, value)) = line.trim().split_once('=') else { continue };
+        let on = match value.trim() {
+            "1" => true,
+            "0" => false,
+            _ => continue,
+        };
+        match key.trim() {
+            "hidden" => hidden = on,
+            "ext" => ext = on,
+            _ => {}
+        }
+    }
+    (hidden, ext)
+}
+
+fn save_view() {
+    let Some(file) = view_file() else { return };
+    if let Some(dir) = file.parent() {
+        let _ = std::fs::create_dir_all(dir);
+    }
+    let text = format!("hidden={}\r\next={}", SHOW_HIDDEN.load(Relaxed) as u8, SHOW_EXT.load(Relaxed) as u8);
+    let _ = std::fs::write(file, text);
+}
+
 fn load_favorites(desktop: Option<&Path>, downloads: Option<&Path>) -> Vec<PathBuf> {
     if let Some(file) = favorites_file()
         && let Ok(text) = std::fs::read_to_string(&file)
@@ -2378,7 +2414,7 @@ fn main() -> Result<(), slint::PlatformError> {
     }));
     host.warm_up(); // loading shell extensions takes seconds the first time; do it now
 
-    let (show_hidden, show_ext) = shell::explorer_view();
+    let (show_hidden, show_ext) = load_view();
     SHOW_HIDDEN.store(show_hidden, Relaxed);
     SHOW_EXT.store(show_ext, Relaxed);
     ui.set_show_hidden(show_hidden);
