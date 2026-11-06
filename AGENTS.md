@@ -26,7 +26,6 @@ cargo fmt                               # 포맷 (rustfmt 설정 파일은 없�
 | `core/src/lib.rs` | `Entry`, `list_dir`(NtQueryDirectoryFile), 정렬, 크기/날짜 포맷 |
 | `core/src/search.rs` | 검색 패턴(단어/글롭/정규식), 범위(`Scope`), 쿼리→`Plan` 해석, 폴더 순회 |
 | `core/src/index.rs` | MFT/USN 저널, 인메모리 색인, 인덱스 파이프 클라이언트와 프로토콜 |
-| `core/src/content.rs` | 파일 내용 검색 (`ignore` + `grep-searcher`) |
 | `core/src/shell.rs` | IFileOperation, 클립보드, 드라이브/알려진 폴더, 승격 실행, 파일 열기 |
 | `core/src/menu.rs` | 셸 메뉴 호스트 클라이언트와 stdio 프로토콜 |
 | `core/src/watch.rs` | `ReadDirectoryChangesW` 기반 폴더 감시 |
@@ -68,7 +67,7 @@ cargo fmt                               # 포맷 (rustfmt 설정 파일은 없�
 - 기존 코드는 간결한 한 줄 구조체/표현식을 선호합니다. 주변 스타일을 따르고, 불필요한 추상화를 만들지 마세요.
 - `// ponytail:` 주석은 "지금은 이렇게 두고, 필요해지면 개선한다"는 표시입니다. 관련 최적화를 할 때는 주석도 함께 정리하세요.
 - 오류는 `io::Result`/`Result<_, String>`로 전달하고, UI에는 `set_note`로 짧게 보여 줍니다. `unwrap()`은 테스트나 불변식이 확실한 곳에만 쓰세요.
-- 새 의존성은 신중히 추가하세요. 이미 `windows`, `slint`, `ignore`, `grep-*`, `windows-service`를 사용합니다.
+- 새 의존성은 신중히 추가하세요. 이미 `windows`, `slint`, `ignore`, `windows-service`를 사용합니다.
 - 릴리스 빌드에서 콘솔 창을 숨기는 `#![cfg_attr(not(debug_assertions), windows_subsystem = "windows")]`를 유지하세요.
 
 ## 자주 하는 변경

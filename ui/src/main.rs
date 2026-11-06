@@ -10,7 +10,6 @@ use std::sync::atomic::{AtomicBool, AtomicU64, Ordering::Relaxed, Ordering::SeqC
 use std::thread;
 use std::time::{Duration, Instant};
 
-use fex_core::content;
 use fex_core::icons::{self, IconKey};
 use fex_core::index::{self, QueryError, Results};
 use fex_core::menu::{HANG_LIMIT, MenuHost, MenuItem, MenuResult, Request};
@@ -19,7 +18,7 @@ use fex_core::shell::{self, Op};
 use fex_core::watch;
 use fex_core::{Entry, SortKey, format_filetime, format_size, list_dir, sort_order};
 use popup::{Own, SEP, own};
-use tree::{FlatTree, RowMeta, SearchTree, file_entry, synthetic_folder};
+use tree::{FlatTree, RowMeta, SearchTree, file_entry};
 use slint::platform::{Key, PointerEventButton, WindowEvent};
 use slint::{ComponentHandle, Model, ModelNotify, ModelRc, ModelTracker, Rgba8Pixel, SharedPixelBuffer, SharedString, VecModel};
 use windows::Win32::Foundation::{HWND, LPARAM, LRESULT, POINT, RECT, WPARAM};
@@ -67,8 +66,6 @@ const MENU_WAIT: Duration = Duration::from_millis(150);
 
 /// Most search hits shown (the status bar says how many matched in all).
 const SEARCH_LIMIT: usize = 2000;
-/// Content search stops after this many matching files.
-const CONTENT_LIMIT: usize = 5000;
 
 /// The shell namespace path of "내 PC". It cannot collide with a file-system path.
 const THIS_PC: &str = r"::{20D04FE0-3AEA-1069-A2D8-08002B30309D}";
@@ -103,16 +100,6 @@ struct ThisPcRow {
     usage: f32,
     free: u64,
     total: u64,
-}
-
-/// "내용:hello" / "content:hello" -> Some("hello"): search inside files.
-fn content_query(q: &str) -> Option<String> {
-    let lower = q.to_lowercase();
-    ["내용:", "content:"]
-        .iter()
-        .find(|p| lower.starts_with(**p))
-        .map(|p| q[p.len()..].trim().to_string())
-        .filter(|t| !t.is_empty())
 }
 
 /// The index service understands `re:` but not our UI's regex toggle, so mark the query.
@@ -1731,9 +1718,6 @@ impl App {
     }
 
     fn search_in(&self, t: &Rc<Tab>, query: String) {
-        if let Some(text) = content_query(&query) {
-            return self.content_search(t, query, text);
-        }
         let cwd = t.cwd.borrow().clone();
         if is_this_pc(&cwd) || cwd.as_os_str().is_empty() {
             return self.set_note(t, "폴더에서만 검색할 수 있음".into());
@@ -2050,125 +2034,6 @@ impl App {
         *t.note.borrow_mut() = note;
         self.update_status(&t);
         self.sync_fit(&t);
-    }
-
-    /// "내용:<text>" searches inside the files under the current folder; hits stream in.
-    fn content_search(&self, t: &Rc<Tab>, query: String, text: String) {
-        let root = t.cwd.borrow().clone();
-        if is_this_pc(&root) {
-            return self.set_note(t, "폴더에서만 내용을 검색할 수 있음".into());
-        }
-        if root.as_os_str().is_empty() {
-            return;
-        }
-        let seq = self.search_seq.fetch_add(1, SeqCst) + 1;
-        // Switch to an empty tree at once; it fills as files match.
-        t.epoch.fetch_add(1, SeqCst);
-        t.pending.take();
-        t.bump_sort();
-        let mut entries = Vec::new();
-        let mut tree = SearchTree::default();
-        tree.root_entry(&mut entries, &root, synthetic_folder(&root));
-        t.rows.replace_search(entries, FlatTree::default());
-        t.hit_count.set(0);
-        t.cursor.set(None);
-        t.anchor.set(None);
-        *t.search.borrow_mut() = Some(Search { query, scope: Scope::Under(root.clone()), tree, options: t.search_options.get() });
-        *t.note.borrow_mut() = format!("'{}' 아래에서 내용 검색 중…", t.title());
-        if self.is_active(t) {
-            self.ui().set_search_mode(true);
-            self.ui().set_list_y(0.0);
-        }
-        self.update_status(t);
-
-        let (id, latest) = (t.id, self.search_seq.clone());
-        // Walking a whole tree per keystroke is wasteful: start once typing pauses.
-        slint::Timer::single_shot(Duration::from_millis(300), move || {
-            if latest.load(SeqCst) == seq {
-                thread::spawn(move || content_worker(id, seq, latest, root, text));
-            }
-        });
-    }
-}
-
-/// Runs a content search and streams the matching files to the tab in batches.
-fn content_worker(id: u64, seq: u64, latest: Arc<AtomicU64>, root: PathBuf, text: String) {
-    use std::sync::Mutex;
-    use std::sync::atomic::{AtomicBool, AtomicUsize};
-    let start = Instant::now();
-    let pending = Mutex::new(Vec::<PathBuf>::new());
-    let (count, done) = (AtomicUsize::new(0), AtomicBool::new(false));
-    let flush = || {
-        let batch = std::mem::take(&mut *pending.lock().unwrap());
-        if !batch.is_empty() {
-            let entries = batch.iter().map(|p| file_entry(p, false)).collect();
-            post(move |a| a.content_batch(id, seq, batch, entries));
-        }
-    };
-    let r = thread::scope(|s| {
-        // Shows hits within ~0.1 s even when they're sparse (a cold disk can take minutes to
-        // finish), while batching keeps the UI cheap when they pour in.
-        s.spawn(|| {
-            while !done.load(SeqCst) {
-                thread::sleep(Duration::from_millis(100));
-                flush();
-            }
-        });
-        let r = content::search(&root, &text, |path| {
-            if latest.load(SeqCst) != seq {
-                return false; // the query changed
-            }
-            pending.lock().unwrap().push(path);
-            count.fetch_add(1, SeqCst) + 1 < CONTENT_LIMIT
-        });
-        done.store(true, SeqCst);
-        r
-    });
-    flush();
-    let (took, capped) = (start.elapsed(), count.load(SeqCst) >= CONTENT_LIMIT);
-    post(move |a| a.content_done(id, seq, took, capped, r.err()));
-}
-
-impl App {
-    fn content_batch(&self, id: u64, seq: u64, paths: Vec<PathBuf>, entries: Vec<Entry>) {
-        let Some(t) = self.find(id) else { return };
-        if self.search_seq.load(SeqCst) != seq {
-            return;
-        }
-        let flat = {
-            let mut search = t.search.borrow_mut();
-            let Some(search) = search.as_mut() else { return };
-            let base = search.scope.root().map(Path::to_path_buf);
-            let mut all = t.rows.entries.borrow_mut();
-            let nodes = Arc::make_mut(&mut all);
-            for (path, entry) in paths.into_iter().zip(entries) {
-                search.tree.insert(nodes, &path, false, Some(entry), base.as_deref());
-            }
-            drop(all);
-            let all = t.rows.entries.borrow();
-            let (key, desc) = t.sort.get();
-            search.flatten(&all, key, desc)
-        };
-        t.hit_count.set(flat.hits);
-        t.rows.update_search(flat);
-        self.update_status(&t);
-    }
-
-    fn content_done(&self, id: u64, seq: u64, took: Duration, capped: bool, err: Option<String>) {
-        let Some(t) = self.find(id) else { return };
-        if self.search_seq.load(SeqCst) != seq {
-            return;
-        }
-        let mut note = format!("내용 검색 {:.1} s", took.as_secs_f64());
-        if capped {
-            note += &format!(" · 처음 {CONTENT_LIMIT}개에서 멈춤");
-        }
-        if let Some(e) = err {
-            note += &format!(" · {e}");
-        }
-        *t.note.borrow_mut() = note;
-        self.sync_fit(&t);
-        self.resort(&t);
     }
 
     fn exit_search(&self, t: &Rc<Tab>) {
@@ -3666,14 +3531,6 @@ fn main() -> Result<(), slint::PlatformError> {
 
 #[cfg(test)]
 mod tests {
-    #[test]
-    fn content_prefix() {
-        assert_eq!(super::content_query("내용:보고서 초안").as_deref(), Some("보고서 초안"));
-        assert_eq!(super::content_query("Content: TODO ").as_deref(), Some("TODO"));
-        assert_eq!(super::content_query("내용:"), None); // nothing to look for yet
-        assert_eq!(super::content_query("notepad"), None);
-    }
-
     #[test]
     fn crumbs_from_the_drive_root() {
         let crumbs = super::crumbs_for(std::path::Path::new(r"C:\Users\hp\source"));

@@ -990,7 +990,7 @@ export component AppWindow inherits Window {
                     enabled: !root.this-pc;
                     placeholder-text: root.this-pc
                         ? "폴더에서만 검색"
-                        : "검색 (현재+하위) · 공백 AND · ; OR · 내용:단어";
+                        : "검색 (현재+하위) · 공백 AND · ; OR";
                     text <=> root.search-text;
                     edited(t) => {
                         root.search(t);

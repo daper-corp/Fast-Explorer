@@ -5,9 +5,6 @@ edition.workspace = true
 license.workspace = true
 
 [dependencies]
-encoding_rs = "0.8.44"
-grep-regex = "0.1.14"
-grep-searcher = "0.1.17"
 ignore = "0.4.34"
 regex = "1"
 windows = { version = "0.62", features = [
