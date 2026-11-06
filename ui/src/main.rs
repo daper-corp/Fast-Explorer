@@ -110,11 +110,7 @@ impl Model for Rows {
         let entries = self.entries.borrow();
         let e = &entries[i as usize];
         let ext = e.extension();
-        let mut name = e.name();
-        // Like Explorer with extensions hidden: "report" for "report.txt" (folders keep dots).
-        if !SHOW_EXT.load(Relaxed) && !e.is_dir() && !ext.is_empty() {
-            name.truncate(name.len() - ext.len() - 1);
-        }
+        let name = display_name(e);
         let stem = match name.rfind('.') {
             Some(p) if p > 0 && !e.is_dir() => p,
             _ => name.len(),
@@ -123,14 +119,9 @@ impl Model for Rows {
             Some(dir) => PathBuf::from(dir).join(e.os_name()),
             None => self.base.borrow().join(e.os_name()),
         }));
-        let kind = match (e.is_dir(), e.extension()) {
-            (true, _) => "파일 폴더".to_string(),
-            (false, x) if x.is_empty() => "파일".to_string(),
-            (false, x) => format!("{} 파일", x.to_uppercase()),
-        };
         Some(Row {
             date: format_filetime(e.modified).into(),
-            kind: kind.into(),
+            kind: kind_of(e).into(),
             size: if e.is_dir() { SharedString::new() } else { format_size(e.size).into() },
             selected: self.selected.borrow()[i as usize],
             editing: self.editing.get() == Some(i),
@@ -444,6 +435,7 @@ impl App {
         ui.set_rows(ModelRc::from(t.rows.clone()));
         ui.set_active_tab(i as i32);
         self.sync_view(&t);
+        self.sync_fit(&t);
         ui.set_list_y(t.scroll.get());
         ui.invoke_focus_list();
     }
@@ -623,6 +615,20 @@ impl App {
         }
     }
 
+    /// Tells the UI the widest visible text in each column, for double-click auto-fit.
+    fn sync_fit(&self, t: &Tab) {
+        if !self.is_active(t) {
+            return;
+        }
+        let fit = fit_samples(t);
+        let ui = self.ui();
+        ui.set_fit_name(fit.name.into());
+        ui.set_fit_location(fit.location.into());
+        ui.set_fit_date(fit.date.into());
+        ui.set_fit_kind(fit.kind.into());
+        ui.set_fit_size(fit.size.into());
+    }
+
     fn set_note(&self, t: &Tab, note: String) {
         *t.note.borrow_mut() = note;
         self.update_status(t);
@@ -718,6 +724,7 @@ impl App {
         }
         self.commit(&t); // an empty folder sends no batches
         t.list_ms.set(ms(took));
+        self.sync_fit(&t);
         self.resort(&t);
     }
 
@@ -804,6 +811,7 @@ impl App {
             *t.note.borrow_mut() = "변경 감지 · 자동 새로 고침".into();
         }
         self.update_status(&t);
+        self.sync_fit(&t);
     }
 
     fn apply_after(&self, t: &Tab) {
@@ -1337,6 +1345,7 @@ impl App {
             self.ui().set_list_y(0.0);
         }
         self.update_status(&t);
+        self.sync_fit(&t);
     }
 
     /// "내용:<text>" searches inside the files under the current folder; hits stream in.
@@ -1448,6 +1457,7 @@ impl App {
             note += &format!(" · {e}");
         }
         *t.note.borrow_mut() = note;
+        self.sync_fit(&t);
         self.resort(&t);
     }
 
@@ -1885,6 +1895,7 @@ impl App {
         for t in self.tabs.borrow().iter() {
             self.resort(t);
         }
+        self.sync_fit(&self.tab());
         ui.invoke_focus_list();
     }
 
@@ -1995,11 +2006,107 @@ fn shown(e: &Entry) -> bool {
     SHOW_HIDDEN.load(Relaxed) || e.attrs & FILE_ATTRIBUTE_HIDDEN == 0
 }
 
+/// The name as displayed: extensions may be hidden, like Explorer (folders keep dots).
+fn display_name(e: &Entry) -> String {
+    let mut name = e.name();
+    let ext = e.extension();
+    if !SHOW_EXT.load(Relaxed) && !e.is_dir() && !ext.is_empty() {
+        name.truncate(name.len() - ext.len() - 1);
+    }
+    name
+}
+
+fn kind_of(e: &Entry) -> String {
+    match (e.is_dir(), e.extension()) {
+        (true, _) => "파일 폴더".to_string(),
+        (false, x) if x.is_empty() => "파일".to_string(),
+        (false, x) => format!("{} 파일", x.to_uppercase()),
+    }
+}
+
 /// Sorted display order, without hidden items unless "숨긴 항목" is on.
 fn display_order(entries: &[Entry], key: SortKey, desc: bool) -> Vec<u32> {
     let mut order = sort_order(entries, key, desc);
     order.retain(|&i| shown(&entries[i as usize]));
     order
+}
+
+/// The widest visible text in each column; the UI measures it exactly when a divider is
+/// double-clicked. Approximate ranking here only decides which sample to measure.
+struct FitSamples {
+    name: String,
+    location: String,
+    date: String,
+    kind: String,
+    size: String,
+}
+
+fn fit_samples(t: &Tab) -> FitSamples {
+    let entries = t.rows.entries.borrow();
+    let locations = t.rows.locations.borrow();
+    let searching = t.search.borrow().is_some();
+    let mut name = "이름".to_string();
+    let mut location = "위치".to_string();
+    let mut date = "수정한 날짜".to_string();
+    let mut kind = "유형".to_string();
+    let mut size = "크기".to_string();
+    let (mut name_w, mut location_w) = (text_units(&name), text_units(&location));
+    let (mut kind_w, size_w) = (text_units(&kind), text_units(&size));
+    let mut has_date = false;
+    let mut max_size = None;
+    for (i, e) in entries.iter().enumerate() {
+        if !shown(e) {
+            continue;
+        }
+        let n = display_name(e);
+        let w = text_units(&n);
+        if w > name_w {
+            name_w = w;
+            name = n;
+        }
+        if searching
+            && let Some(l) = locations.get(i)
+        {
+            let w = text_units(l);
+            if w > location_w {
+                location_w = w;
+                location = l.clone();
+            }
+        }
+        let k = kind_of(e);
+        let w = text_units(&k);
+        if w > kind_w {
+            kind_w = w;
+            kind = k;
+        }
+        has_date |= e.modified > 0;
+        if !e.is_dir() {
+            max_size = Some(max_size.map_or(e.size, |m: u64| m.max(e.size)));
+        }
+    }
+    if has_date && text_units("0000-00-00 00:00") > text_units(&date) {
+        date = "0000-00-00 00:00".into();
+    }
+    if let Some(bytes) = max_size {
+        let s = format_size(bytes);
+        if text_units(&s) > size_w {
+            size = s;
+        }
+    }
+    FitSamples { name, location, date, kind, size }
+}
+
+/// Rough advance ranking (1/10 em), used only to pick which sample the UI should measure.
+fn text_units(text: &str) -> usize {
+    text.chars()
+        .map(|c| match c {
+            ' ' | '\'' | '.' | ',' | ':' | ';' | '!' | '|' | '`' | 'i' | 'l' | 'j' | 't' | 'f' | 'r' | 'I' => 3,
+            'm' | 'w' | 'M' | 'W' => 9,
+            c if c.is_ascii_uppercase() => 7,
+            c if c.is_ascii() => 6,
+            _ => 10,
+        })
+        .sum()
 }
 
 /// Icons already loaded (None: the shell had none), and the ones on their way.

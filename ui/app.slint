@@ -84,7 +84,16 @@ component HeaderCell inherits Rectangle {
     in property <string> text;
     in property <bool> sorted;
     in property <bool> descending;
+    in property <length> min-column-width: 60px;
+    in property <length> max-column-width: 1200px;
+    // The width a double-click on the resize handle snaps the column to.
+    in property <length> fit-width: 100px;
     callback clicked;
+    callback resize(length);
+    callback auto-fit;
+
+    private property <length> drag-start-width: 0px;
+    private property <length> drag-start-pointer-x: 0px;
 
     HorizontalLayout {
         padding-left: 8px;
@@ -107,6 +116,45 @@ component HeaderCell inherits Rectangle {
     TouchArea {
         clicked => {
             root.clicked();
+        }
+    }
+
+    // Drag the right edge to resize the column; double-click it to fit the contents.
+    Rectangle {
+        x: root.width - 7px;
+        width: 7px;
+        height: root.height;
+        background: transparent;
+
+        Rectangle {
+            x: parent.width - 1px;
+            width: 1px;
+            height: 100%;
+            background: divider-touch.has-hover || divider-touch.pressed ? Palette.foreground.transparentize(0.55) : transparent;
+        }
+
+        divider-touch := TouchArea {
+            mouse-cursor: ew-resize;
+            pointer-event(e) => {
+                if e.kind == PointerEventKind.down && e.button == PointerEventButton.left {
+                    // Absolute pointer position and the width when pressed: the handle moves
+                    // while dragging, so a local delta would drift.
+                    root.drag-start-width = root.width;
+                    root.drag-start-pointer-x = self.absolute-position.x + self.mouse-x;
+                }
+            }
+            moved => {
+                if self.pressed {
+                    root.resize(clamp(
+                        root.drag-start-width + self.absolute-position.x + self.mouse-x - root.drag-start-pointer-x,
+                        root.min-column-width,
+                        root.max-column-width,
+                    ));
+                }
+            }
+            double-clicked => {
+                root.auto-fit();
+            }
         }
     }
 }
@@ -376,6 +424,13 @@ export component AppWindow inherits Window {
     in property <bool> can-forward;
     in property <int> sort-column;
     in property <bool> sort-desc;
+    // Widest visible cell in each column, measured by the hidden Text elements below and
+    // used to fit a column to its contents on a double-click of the resize handle.
+    in property <string> fit-name: "이름";
+    in property <string> fit-location: "위치";
+    in property <string> fit-date: "수정한 날짜";
+    in property <string> fit-kind: "유형";
+    in property <string> fit-size: "크기";
     in property <[Place]> favorites;
     in property <[Place]> drives;
     in property <int> drop-row: -1;
@@ -801,49 +856,95 @@ export component AppWindow inherits Window {
                     }
 
                     // Column header
-                    Rectangle {
+                    header-bar := Rectangle {
                         height: 28px;
+                        clip: true;
                         HorizontalLayout {
                             padding-left: root.list-margin + 6px;
                             alignment: start;
-                            HeaderCell {
+                            name-header := HeaderCell {
                                 width: root.w-name;
+                                min-column-width: 120px;
+                                max-column-width: max(120px, header-bar.width - root.list-margin - 7px);
+                                fit-width: max(120px, measure-name.preferred-width + 34px);
                                 text: "이름";
                                 sorted: root.sort-column == 0;
                                 descending: root.sort-desc;
                                 clicked => {
                                     root.sort(0);
                                 }
+                                resize(w) => {
+                                    root.w-name = w;
+                                }
+                                auto-fit => {
+                                    root.w-name = min(name-header.max-column-width, name-header.fit-width);
+                                }
                             }
-                            if root.search-mode: HeaderCell {
+                            if root.search-mode: location-header := HeaderCell {
                                 width: root.w-location;
+                                min-column-width: 90px;
+                                max-column-width: max(90px, header-bar.width - root.list-margin - 7px - root.w-name);
+                                fit-width: max(90px, measure-location.preferred-width + 24px);
                                 text: "위치";
+                                resize(w) => {
+                                    root.w-location = w;
+                                }
+                                auto-fit => {
+                                    root.w-location = min(location-header.max-column-width, location-header.fit-width);
+                                }
                             }
-                            HeaderCell {
+                            date-header := HeaderCell {
                                 width: root.w-date;
+                                min-column-width: 100px;
+                                max-column-width: max(100px, header-bar.width - root.list-margin - 7px - root.w-name - (root.search-mode ? root.w-location : 0px));
+                                fit-width: max(100px, measure-date.preferred-width + 22px);
                                 text: "수정한 날짜";
                                 sorted: root.sort-column == 1;
                                 descending: root.sort-desc;
                                 clicked => {
                                     root.sort(1);
                                 }
+                                resize(w) => {
+                                    root.w-date = w;
+                                }
+                                auto-fit => {
+                                    root.w-date = min(date-header.max-column-width, date-header.fit-width);
+                                }
                             }
-                            HeaderCell {
+                            kind-header := HeaderCell {
                                 width: root.w-kind;
+                                min-column-width: 70px;
+                                max-column-width: max(70px, header-bar.width - root.list-margin - 7px - root.w-name - (root.search-mode ? root.w-location : 0px) - root.w-date);
+                                fit-width: max(70px, measure-kind.preferred-width + 22px);
                                 text: "유형";
                                 sorted: root.sort-column == 2;
                                 descending: root.sort-desc;
                                 clicked => {
                                     root.sort(2);
                                 }
+                                resize(w) => {
+                                    root.w-kind = w;
+                                }
+                                auto-fit => {
+                                    root.w-kind = min(kind-header.max-column-width, kind-header.fit-width);
+                                }
                             }
-                            HeaderCell {
+                            size-header := HeaderCell {
                                 width: root.w-size;
+                                min-column-width: 70px;
+                                max-column-width: max(70px, header-bar.width - root.list-margin - 7px - root.w-name - (root.search-mode ? root.w-location : 0px) - root.w-date - root.w-kind);
+                                fit-width: max(70px, measure-size.preferred-width + 22px);
                                 text: "크기";
                                 sorted: root.sort-column == 3;
                                 descending: root.sort-desc;
                                 clicked => {
                                     root.sort(3);
+                                }
+                                resize(w) => {
+                                    root.w-size = w;
+                                }
+                                auto-fit => {
+                                    root.w-size = min(size-header.max-column-width, size-header.fit-width);
                                 }
                             }
                         }
@@ -1037,6 +1138,36 @@ export component AppWindow inherits Window {
                 Text {
                     text: root.status;
                     color: root.dim;
+                }
+            }
+        }
+
+        // Off-screen samples for "fit column to contents" (double-click a header divider).
+        // Measuring with real Text elements keeps the fit identical to what the rows render.
+        Rectangle {
+            x: -10000px;
+            y: 0px;
+            width: 5000px;
+            height: 24px;
+            opacity: 0;
+            clip: true;
+
+            HorizontalLayout {
+                alignment: start;
+                measure-name := Text {
+                    text: root.fit-name;
+                }
+                measure-location := Text {
+                    text: root.fit-location;
+                }
+                measure-date := Text {
+                    text: root.fit-date;
+                }
+                measure-kind := Text {
+                    text: root.fit-kind;
+                }
+                measure-size := Text {
+                    text: root.fit-size;
                 }
             }
         }
