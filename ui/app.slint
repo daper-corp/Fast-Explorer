@@ -1,4 +1,4 @@
-import { LineEdit, CheckBox, ComboBox, ListView, ScrollView, Palette } from "std-widgets.slint";
+import { LineEdit, CheckBox, ListView, ScrollView, Palette } from "std-widgets.slint";
 
 export struct Row {
     name: string,
@@ -172,6 +172,83 @@ component HeaderCell inherits Rectangle {
     }
 }
 
+// The three-dot "kebab" button for the search options.
+component KebabButton inherits Rectangle {
+    callback clicked;
+
+    horizontal-stretch: 0;
+    width: 30px;
+    height: 30px;
+    border-radius: 6px;
+    background: touch.has-hover ? Palette.foreground.transparentize(0.9) : transparent;
+
+    VerticalLayout {
+        width: 100%;
+        height: 100%;
+        alignment: center;
+        spacing: 2px;
+        Rectangle { width: 3px; height: 3px; border-radius: 1.5px; background: Palette.foreground; }
+        Rectangle { width: 3px; height: 3px; border-radius: 1.5px; background: Palette.foreground; }
+        Rectangle { width: 3px; height: 3px; border-radius: 1.5px; background: Palette.foreground; }
+    }
+
+    touch := TouchArea {
+        width: 100%;
+        height: 100%;
+        mouse-cursor: pointer;
+        clicked => {
+            root.clicked();
+        }
+    }
+}
+
+// A radio-like row used inside the search-options menu (no nested popup needed).
+component OptionChoice inherits Rectangle {
+    in property <string> text;
+    in property <bool> selected;
+    callback clicked;
+
+    height: 26px;
+    border-radius: 4px;
+    background: touch.has-hover ? Palette.foreground.transparentize(0.94) : transparent;
+
+    HorizontalLayout {
+        padding-left: 4px;
+        spacing: 7px;
+        alignment: start;
+        Rectangle {
+            width: 14px;
+            height: 14px;
+            border-radius: 7px;
+            border-width: 1px;
+            border-color: root.selected ? Palette.accent-background : Palette.foreground.transparentize(0.5);
+            background: transparent;
+            if root.selected: Rectangle {
+                x: 3px;
+                y: 3px;
+                width: 8px;
+                height: 8px;
+                border-radius: 4px;
+                background: Palette.accent-background;
+            }
+        }
+        Text {
+            text: root.text;
+            vertical-alignment: center;
+            color: Palette.foreground;
+        }
+    }
+
+    touch := TouchArea {
+        width: 100%;
+        height: 100%;
+        mouse-cursor: pointer;
+        clicked => {
+            root.clicked();
+        }
+    }
+}
+
 // A flat toolbar button: no border or fill until hovered.
 component ToolButton inherits Rectangle {
     in property <string> text;
@@ -200,6 +277,38 @@ component ToolButton inherits Rectangle {
 
     touch := TouchArea {
         enabled: root.enabled;
+        clicked => {
+            root.clicked();
+        }
+    }
+}
+
+// A flat toolbar button that draws the refresh arrow as a path, so it matches
+// the arrow buttons' size without depending on a glyph in the UI font.
+component RefreshButton inherits Rectangle {
+    callback clicked;
+
+    horizontal-stretch: 0;
+    min-width: 30px;
+    height: 30px;
+    border-radius: 6px;
+    background: touch.has-hover ? Palette.foreground.transparentize(0.9) : transparent;
+
+    Path {
+        x: (root.width - 16px) / 2;
+        y: (root.height - 16px) / 2;
+        width: 16px;
+        height: 16px;
+        viewbox-width: 16;
+        viewbox-height: 16;
+        fill: transparent;
+        stroke: Palette.foreground;
+        stroke-width: 1.3px;
+        commands: "M 12.89 6.22 A 5.2 5.2 0 1 1 10.6 3.5 M 9.65 1.85 L 10.6 3.5 L 8.7 3.5";
+    }
+
+    touch := TouchArea {
+        mouse-cursor: pointer;
         clicked => {
             root.clicked();
         }
@@ -452,8 +561,13 @@ export component AppWindow inherits Window {
     in property <string> status;
     in property <bool> search-mode;
     in-out property <string> search-text;
-    // 0 = 현재 폴더, 1 = 하위 폴더, 2 = 전체 검색.
-    in-out property <int> search-scope: 2;
+    // Search options, kept per tab.
+    in-out property <bool> search-folders: true;
+    in-out property <bool> search-files: true;
+    in-out property <bool> search-regex: false;
+    // 0 = 단순 목록, 1 = 트리 구조.
+    in-out property <int> search-view: 0;
+    private property <bool> search-options-open: false;
     in-out property <bool> show-hidden;
     in-out property <bool> show-ext;
     in property <bool> can-back;
@@ -471,6 +585,8 @@ export component AppWindow inherits Window {
     in property <[Place]> drives;
     in property <int> drop-row: -1;
     in-out property <bool> rubber-on: false;
+    // Set after a native context menu closes: absorbs the click that dismissed it.
+    in-out property <bool> click-shield: false;
     in-out property <length> list-y <=> list.content-y;
     out property <length> list-height: list.visible-height;
     out property <length> list-width: list.width;
@@ -483,10 +599,14 @@ export component AppWindow inherits Window {
     out property <length> address-y: address-box.absolute-position.y;
     out property <length> address-width: address-box.width;
     out property <length> address-height: address-box.height;
+    // The search-options button's place in the window, for its popup.
+    out property <length> options-x: search-options-button.absolute-position.x;
+    out property <length> options-y: search-options-button.absolute-position.y;
+    out property <length> options-height: search-options-button.height;
 
     callback navigate(string);
     callback search(string);
-    callback search-scope-changed();
+    callback search-options-changed();
     callback row-expand(int);
     callback back();
     callback forward();
@@ -540,6 +660,7 @@ export component AppWindow inherits Window {
     }
 
     public function focus-list() {
+        root.search-options-open = false;
         root.address-editing = false;
         root.address-text = root.path;
         root.close-suggestions();
@@ -547,6 +668,7 @@ export component AppWindow inherits Window {
     }
 
     public function focus-address() {
+        root.search-options-open = false;
         root.close-suggestions();
         root.address-editing = true;
         root.address-text = root.path;
@@ -555,6 +677,10 @@ export component AppWindow inherits Window {
     }
 
     public function focus-search() {
+        if (root.this-pc) {
+            return;
+        }
+        root.search-options-open = false;
         root.address-editing = false;
         root.address-text = root.path;
         root.close-suggestions();
@@ -750,9 +876,7 @@ export component AppWindow inherits Window {
                         root.up();
                     }
                 }
-                ToolButton {
-                    text: "↻";
-                    font-size: 16px;
+                RefreshButton {
                     clicked => {
                         root.refresh();
                     }
@@ -860,21 +984,20 @@ export component AppWindow inherits Window {
                         }
                     }
                 }
-                ComboBox {
-                    width: 160px;
-                    horizontal-stretch: 0;
-                    model: ["현재 폴더", "하위 폴더", "전체 검색"];
-                    current-index <=> root.search-scope;
-                    selected(v) => {
-                        root.search-scope-changed();
-                    }
-                }
                 search-box := LineEdit {
-                    width: 280px;
-                    placeholder-text: "검색 (Ctrl+F) · * ? /정규식/ · 내용:단어";
+                    width: 340px;
+                    enabled: !root.this-pc;
+                    placeholder-text: root.this-pc
+                        ? "폴더에서만 검색"
+                        : "검색 (현재+하위) · 공백 AND · ; OR · 내용:단어";
                     text <=> root.search-text;
                     edited(t) => {
                         root.search(t);
+                    }
+                }
+                search-options-button := KebabButton {
+                    clicked => {
+                        root.search-options-open = !root.search-options-open;
                     }
                 }
             }
@@ -1328,6 +1451,85 @@ export component AppWindow inherits Window {
             }
         }
 
+        // Search options: a small menu anchored under the kebab button.
+        if root.search-options-open: TouchArea {
+            width: 100%;
+            height: 100%;
+            clicked => {
+                root.search-options-open = false;
+            }
+        }
+
+        if root.search-options-open: Rectangle {
+            x: max(8px, min(root.options-x + search-options-button.width - 228px, root.width - 228px));
+            y: root.options-y + root.options-height + 4px;
+            width: 220px;
+            height: options-panel.preferred-height + 20px;
+            background: Palette.background;
+            border-radius: 6px;
+            border-width: 1px;
+            border-color: Palette.foreground.transparentize(0.65);
+            drop-shadow-blur: 12px;
+            drop-shadow-color: #00000038;
+            drop-shadow-offset-y: 4px;
+            clip: true;
+
+            options-panel := VerticalLayout {
+                padding: 10px;
+                spacing: 5px;
+
+                Text { text: "검색 옵션"; font-size: 13px; color: Palette.foreground; }
+                Rectangle { height: 2px; }
+
+                Text { text: "검색 대상"; font-size: 12px; color: root.dim; }
+                CheckBox {
+                    text: "폴더";
+                    checked <=> root.search-folders;
+                    changed checked => {
+                        root.search-options-changed();
+                    }
+                }
+                CheckBox {
+                    text: "파일";
+                    checked <=> root.search-files;
+                    changed checked => {
+                        root.search-options-changed();
+                    }
+                }
+
+                Rectangle { height: 4px; }
+
+                Text { text: "패턴"; font-size: 12px; color: root.dim; }
+                CheckBox {
+                    text: "정규식";
+                    checked <=> root.search-regex;
+                    changed checked => {
+                        root.search-options-changed();
+                    }
+                }
+
+                Rectangle { height: 4px; }
+
+                Text { text: "결과 보기"; font-size: 12px; color: root.dim; }
+                OptionChoice {
+                    text: "단순 목록";
+                    selected: root.search-view == 0;
+                    clicked => {
+                        root.search-view = 0;
+                        root.search-options-changed();
+                    }
+                }
+                OptionChoice {
+                    text: "트리 구조";
+                    selected: root.search-view == 1;
+                    clicked => {
+                        root.search-view = 1;
+                        root.search-options-changed();
+                    }
+                }
+            }
+        }
+
         // Off-screen samples for "fit column to contents" (double-click a header divider).
         // Measuring with real Text elements keeps the fit identical to what the rows render.
         Rectangle {
@@ -1366,6 +1568,18 @@ export component AppWindow inherits Window {
             background: transparent;
             border-width: 1px;
             border-color: root.maximized ? transparent : Palette.foreground.transparentize(0.6);
+        }
+    }
+
+    // The left click that dismissed a native context menu: swallow it so a stale pointer
+    // position cannot select, open, or start a drag behind the menu.
+    if root.click-shield: TouchArea {
+        width: 100%;
+        height: 100%;
+        pointer-event(e) => {
+            if e.kind == PointerEventKind.up || e.kind == PointerEventKind.cancel {
+                root.click-shield = false;
+            }
         }
     }
 }

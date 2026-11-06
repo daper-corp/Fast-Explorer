@@ -33,7 +33,7 @@ use windows::Win32::UI::Controls::MARGINS;
 use windows::Win32::UI::Input::KeyboardAndMouse::{GetAsyncKeyState, VK_LBUTTON};
 use windows::Win32::UI::Shell::{DefSubclassProc, SetWindowSubclass};
 use windows::Win32::UI::WindowsAndMessaging::{
-    AllowSetForegroundWindow, GetCursorPos, GetWindowRect, HTBOTTOM, HTBOTTOMLEFT, HTBOTTOMRIGHT, HTLEFT, HTRIGHT,
+    AllowSetForegroundWindow, GetClientRect, GetCursorPos, GetWindowRect, HTBOTTOM, HTBOTTOMLEFT, HTBOTTOMRIGHT, HTLEFT, HTRIGHT,
     HTTOP, HTTOPLEFT, HTTOPRIGHT, IsZoomed, PostMessageW, WM_CLOSE, WM_DEVICECHANGE, WM_NCHITTEST, WM_SIZE,
     WM_XBUTTONDOWN, WM_XBUTTONUP, XBUTTON1, XBUTTON2,
 };
@@ -113,6 +113,18 @@ fn content_query(q: &str) -> Option<String> {
         .find(|p| lower.starts_with(**p))
         .map(|p| q[p.len()..].trim().to_string())
         .filter(|t| !t.is_empty())
+}
+
+/// The index service understands `re:` but not our UI's regex toggle, so mark the query.
+fn service_pattern(pattern: &str, regex: bool) -> String {
+    if !regex {
+        return pattern.to_string();
+    }
+    let source = match pattern.get(..3).is_some_and(|p| p.eq_ignore_ascii_case("re:")) {
+        true => &pattern[3..],
+        false => pattern,
+    };
+    format!("re:{source}")
 }
 
 const SORT_KEYS: [SortKey; 4] = [SortKey::Name, SortKey::Modified, SortKey::Type, SortKey::Size];
@@ -378,38 +390,18 @@ struct After {
     auto: bool,
 }
 
-/// Where the search box looks. The path-typed query can override the first two.
-#[derive(Clone, Copy, PartialEq, Eq, Debug, Default)]
-enum ScopeKind {
-    Current,
-    Subtree,
-    #[default]
-    All,
+/// How search results are matched and shown for one tab.
+#[derive(Clone, Copy, PartialEq, Eq, Debug)]
+struct SearchOptions {
+    folders: bool,
+    files: bool,
+    regex: bool,
+    tree: bool,
 }
 
-impl ScopeKind {
-    fn from_index(i: i32) -> Self {
-        match i {
-            0 => ScopeKind::Current,
-            1 => ScopeKind::Subtree,
-            _ => ScopeKind::All,
-        }
-    }
-
-    fn index(self) -> i32 {
-        match self {
-            ScopeKind::Current => 0,
-            ScopeKind::Subtree => 1,
-            ScopeKind::All => 2,
-        }
-    }
-
-    fn scope(self, cwd: &Path) -> Scope {
-        match self {
-            ScopeKind::Current => Scope::Direct(cwd.to_path_buf()),
-            ScopeKind::Subtree => Scope::Under(cwd.to_path_buf()),
-            ScopeKind::All => Scope::All,
-        }
+impl Default for SearchOptions {
+    fn default() -> Self {
+        SearchOptions { folders: true, files: true, regex: false, tree: false }
     }
 }
 
@@ -418,6 +410,21 @@ struct Search {
     query: String,
     scope: Scope,
     tree: SearchTree,
+    options: SearchOptions,
+}
+
+impl Search {
+    fn flatten(&self, entries: &[Entry], key: SortKey, desc: bool) -> FlatTree {
+        self.tree.flatten(
+            entries,
+            key,
+            desc,
+            SHOW_HIDDEN.load(Relaxed),
+            self.options.folders,
+            self.options.files,
+            self.options.tree,
+        )
+    }
 }
 
 struct Tab {
@@ -441,8 +448,8 @@ struct Tab {
     scroll: Cell<f32>,
     /// Showing search results instead of the folder.
     search: RefCell<Option<Search>>,
-    /// The scope chosen in the search box for this tab.
-    search_scope: Cell<ScopeKind>,
+    /// Folder/file, regex and result-view choices for this tab.
+    search_options: Cell<SearchOptions>,
     /// Matching items in the current search (hidden ones excluded).
     hit_count: Cell<usize>,
     /// Reports changes made to the folder by other programs.
@@ -470,7 +477,7 @@ impl Tab {
             note: RefCell::default(),
             scroll: Cell::new(0.0),
             search: RefCell::default(),
-            search_scope: Cell::new(ScopeKind::All),
+            search_options: Cell::default(),
             hit_count: Cell::new(0),
             watch: RefCell::new(watch::DirWatch::new(move || post(move |a| a.folder_changed(id))).ok()),
             refresh_due: Cell::new(false),
@@ -696,7 +703,11 @@ impl App {
         let query = t.query();
         ui.set_search_mode(query.is_some());
         ui.set_search_text(query.unwrap_or_default().into());
-        ui.set_search_scope(t.search_scope.get().index());
+        let options = t.search_options.get();
+        ui.set_search_folders(options.folders);
+        ui.set_search_files(options.files);
+        ui.set_search_regex(options.regex);
+        ui.set_search_view(if options.tree { 1 } else { 0 });
         self.sync_tabs();
         self.sync_places();
         self.update_status(t);
@@ -1094,7 +1105,7 @@ impl App {
                 let search = t.search.borrow();
                 let search = search.as_ref().expect("checked above");
                 let entries = t.rows.entries.borrow();
-                search.tree.flatten(&entries, key, desc, SHOW_HIDDEN.load(Relaxed))
+                search.flatten(&entries, key, desc)
             };
             t.hit_count.set(flat.hits);
             t.rows.apply_flat(flat);
@@ -1320,6 +1331,47 @@ impl App {
 
     /// Releases the left button in Slint's eyes after DoDragDrop ate the real mouse-up.
     fn end_drag_pointer(&self) {
+        self.release_pointer(PointerEventButton::Left);
+    }
+
+    /// Ends the pointer gesture a native menu left behind: its modal loop eats the
+    /// button-up, so the row's TouchArea would otherwise keep the grab and send the next
+    /// click (and the drag it starts) to the row that was right-clicked.
+    fn end_menu_pointer(&self) {
+        self.ui().window().dispatch_event(WindowEvent::PointerExited);
+        self.shield_menu_click();
+    }
+
+    /// The left click that dismissed a native menu also lands in the window. Absorb it:
+    /// the menu's modal loop leaves Slint's pointer position at the pre-menu spot, so the
+    /// click would otherwise select, open, or start a drag at the wrong place.
+    fn shield_menu_click(&self) {
+        const VK_DOWN: u16 = 0x8000;
+        if unsafe { GetAsyncKeyState(VK_LBUTTON.0 as i32) } as u16 & VK_DOWN == 0 {
+            return;
+        }
+        let hwnd = HWND(self.hwnd() as _);
+        let (mut pt, mut client) = (POINT::default(), RECT::default());
+        unsafe {
+            let _ = GetCursorPos(&mut pt);
+            let _ = GetClientRect(hwnd, &mut client);
+            let _ = ScreenToClient(hwnd, &mut pt);
+        }
+        if pt.x < 0 || pt.y < 0 || pt.x >= client.right || pt.y >= client.bottom {
+            return;
+        }
+        let ui = self.ui();
+        ui.set_click_shield(true);
+        let weak = ui.as_weak();
+        // The shield clears itself on the button-up; this only recovers if none arrives.
+        slint::Timer::single_shot(Duration::from_millis(300), move || {
+            if let Some(ui) = weak.upgrade() {
+                ui.set_click_shield(false);
+            }
+        });
+    }
+
+    fn release_pointer(&self, button: PointerEventButton) {
         let ui = self.ui();
         let mut pt = POINT::default();
         unsafe {
@@ -1328,7 +1380,7 @@ impl App {
         }
         let scale = ui.window().scale_factor();
         let position = slint::LogicalPosition::new(pt.x as f32 / scale, pt.y as f32 / scale);
-        ui.window().dispatch_event(WindowEvent::PointerReleased { position, button: PointerEventButton::Left });
+        ui.window().dispatch_event(WindowEvent::PointerReleased { position, button });
     }
 
     fn rubber_start(&self, ctrl: bool) {
@@ -1683,33 +1735,40 @@ impl App {
             return self.content_search(t, query, text);
         }
         let cwd = t.cwd.borrow().clone();
-        if cwd.as_os_str().is_empty() {
-            return;
+        if is_this_pc(&cwd) || cwd.as_os_str().is_empty() {
+            return self.set_note(t, "폴더에서만 검색할 수 있음".into());
         }
-        // "내 PC" has no files of its own; search every drive unless the query names a path.
-        let chosen = match is_this_pc(&cwd) {
-            true => Scope::All,
-            false => t.search_scope.get().scope(&cwd),
-        };
-        let plan = match search::plan(&query, &cwd, &chosen) {
+        let options = t.search_options.get();
+        let scope = Scope::Under(cwd.clone());
+        let plan = match search::plan_mode(&query, &cwd, &scope, options.regex) {
             Ok(plan) => plan,
             Err(e) => return self.set_note(t, e),
         };
-        let pattern = match Pattern::compile(&plan.pattern) {
+        // A typed path may narrow the search, but the result must stay inside this folder.
+        let Some(root) = plan.scope.root() else {
+            return self.set_note(t, "현재 폴더와 그 하위 폴더만 검색할 수 있음".into());
+        };
+        if search::below(root, &cwd).is_none() {
+            return self.set_note(t, "현재 폴더와 그 하위 폴더만 검색할 수 있음".into());
+        }
+        let pattern = match Pattern::compile_mode(&plan.pattern, options.regex) {
             Ok(pattern) => pattern,
             Err(e) => return self.set_note(t, e),
         };
+        let service = service_pattern(&plan.pattern, options.regex);
         let seq = self.search_seq.fetch_add(1, SeqCst) + 1;
         match plan.scope.clone() {
             Scope::Direct(root) => self.direct_search(t, query, root, pattern, seq),
             Scope::Under(root) if index::is_indexable(&root) => {
-                self.index_or_walk(t.id, query, plan.scope, plan.pattern, seq, false)
+                self.index_or_walk(t.id, query, plan.scope, service, seq, false, options.regex)
             }
             Scope::Under(root) => {
                 let (id, latest) = (t.id, self.search_seq.clone());
                 thread::spawn(move || walk_search_worker(id, seq, latest, root, query, pattern));
             }
-            Scope::All => self.index_or_walk(t.id, query, plan.scope, plan.pattern, seq, true),
+            Scope::All => {
+                self.index_or_walk(t.id, query, plan.scope, service, seq, false, options.regex)
+            }
         }
     }
 
@@ -1763,7 +1822,16 @@ impl App {
 
     /// The index is the fast path; a subtree on a non-indexed volume (or without the service)
     /// falls back to walking the folder.
-    fn index_or_walk(&self, id: u64, query: String, scope: Scope, pattern: String, seq: u64, offer_install: bool) {
+    fn index_or_walk(
+        &self,
+        id: u64,
+        query: String,
+        scope: Scope,
+        pattern: String,
+        seq: u64,
+        offer_install: bool,
+        regex: bool,
+    ) {
         let latest = self.search_seq.clone();
         thread::spawn(move || {
             let start = Instant::now();
@@ -1780,10 +1848,10 @@ impl App {
                 Err(QueryError::NotInstalled) if offer_install => {
                     post(move |a| a.offer_install(id, query))
                 }
-                Err(e @ (QueryError::NotInstalled | QueryError::Unavailable(_))) => {
+                Err(e @ (QueryError::NotInstalled | QueryError::Unavailable(_) | QueryError::Rejected(_))) => {
                     match scope.root().map(Path::to_path_buf) {
                         Some(root) => {
-                            let pattern = match Pattern::compile(&pattern) {
+                            let pattern = match Pattern::compile_mode(&pattern, regex) {
                                 Ok(pattern) => pattern,
                                 Err(e) => {
                                     return post(move |a| {
@@ -1809,11 +1877,6 @@ impl App {
                         }
                     }
                 }
-                Err(QueryError::Rejected(e)) => post(move |a| {
-                    if let Some(t) = a.find(id) {
-                        a.set_note(&t, format!("검색할 수 없음: {e}"));
-                    }
-                }),
             }
         });
     }
@@ -1823,15 +1886,24 @@ impl App {
         t.epoch.fetch_add(1, SeqCst); // drop any folder listing still arriving
         t.pending.take();
         t.bump_sort();
+        let options = t.search_options.get();
         let flat = {
             let (key, desc) = t.sort.get();
-            tree.flatten(&entries, key, desc, SHOW_HIDDEN.load(Relaxed))
+            tree.flatten(
+                &entries,
+                key,
+                desc,
+                SHOW_HIDDEN.load(Relaxed),
+                options.folders,
+                options.files,
+                options.tree,
+            )
         };
         t.hit_count.set(flat.hits);
         t.rows.replace_search(entries, flat);
         t.cursor.set(None);
         t.anchor.set(None);
-        *t.search.borrow_mut() = Some(Search { query, scope, tree });
+        *t.search.borrow_mut() = Some(Search { query, scope, tree, options });
     }
 
     #[allow(clippy::too_many_arguments)]
@@ -1929,7 +2001,7 @@ impl App {
         t.hit_count.set(0);
         t.cursor.set(None);
         t.anchor.set(None);
-        *t.search.borrow_mut() = Some(Search { query, scope: Scope::Under(root), tree });
+        *t.search.borrow_mut() = Some(Search { query, scope: Scope::Under(root), tree, options: t.search_options.get() });
         *t.note.borrow_mut() = "색인 없이 폴더를 직접 검색 중…".into();
         if self.is_active(&t) {
             self.ui().set_search_mode(true);
@@ -1956,7 +2028,7 @@ impl App {
             drop(all);
             let all = t.rows.entries.borrow();
             let (key, desc) = t.sort.get();
-            search.tree.flatten(&all, key, desc, SHOW_HIDDEN.load(Relaxed))
+            search.flatten(&all, key, desc)
         };
         t.hit_count.set(flat.hits);
         t.rows.update_search(flat);
@@ -2001,7 +2073,7 @@ impl App {
         t.hit_count.set(0);
         t.cursor.set(None);
         t.anchor.set(None);
-        *t.search.borrow_mut() = Some(Search { query, scope: Scope::Under(root.clone()), tree });
+        *t.search.borrow_mut() = Some(Search { query, scope: Scope::Under(root.clone()), tree, options: t.search_options.get() });
         *t.note.borrow_mut() = format!("'{}' 아래에서 내용 검색 중…", t.title());
         if self.is_active(t) {
             self.ui().set_search_mode(true);
@@ -2075,7 +2147,7 @@ impl App {
             drop(all);
             let all = t.rows.entries.borrow();
             let (key, desc) = t.sort.get();
-            search.tree.flatten(&all, key, desc, SHOW_HIDDEN.load(Relaxed))
+            search.flatten(&all, key, desc)
         };
         t.hit_count.set(flat.hits);
         t.rows.update_search(flat);
@@ -2107,18 +2179,59 @@ impl App {
         self.sync_view(t);
     }
 
-    /// The scope combo changed: remember it for this tab and rerun the active search.
-    fn search_scope_changed(&self) {
+    /// Search options changed: display filters re-flatten; regex needs a new query.
+    fn search_options_changed(&self) {
         let t = self.tab();
-        let kind = ScopeKind::from_index(self.ui().get_search_scope());
-        if t.search_scope.replace(kind) == kind {
-            return; // picking the current scope again
+        let mut options = SearchOptions {
+            folders: self.ui().get_search_folders(),
+            files: self.ui().get_search_files(),
+            regex: self.ui().get_search_regex(),
+            tree: self.ui().get_search_view() == 1,
+        };
+        if !options.folders && !options.files {
+            options.files = true;
+            self.ui().set_search_files(true);
         }
-        if let Some(query) = t.query()
-            && content_query(&query).is_none()
-        {
+        let old = t.search_options.replace(options);
+        if old == options {
+            return;
+        }
+        let Some(query) = t.query() else { return };
+        if old.regex != options.regex {
             self.search_in(&t, query);
+        } else {
+            self.reflatten_search(&t);
         }
+    }
+
+    /// Applies folder/file/view filters to the loaded results without running the search again.
+    fn reflatten_search(&self, t: &Rc<Tab>) {
+        let options = t.search_options.get();
+        let flat = {
+            let mut search = t.search.borrow_mut();
+            let Some(search) = search.as_mut() else { return };
+            search.options = options;
+            let entries = t.rows.entries.borrow();
+            let (key, desc) = t.sort.get();
+            search.flatten(&entries, key, desc)
+        };
+        // Rows hidden by the new filters must not stay selected or under the cursor.
+        let visible: HashSet<u32> = flat.order.iter().copied().collect();
+        for (i, selected) in t.rows.selected.borrow_mut().iter_mut().enumerate() {
+            if *selected && !visible.contains(&(i as u32)) {
+                *selected = false;
+            }
+        }
+        if t.cursor.get().is_some_and(|c| !visible.contains(&c)) {
+            t.cursor.set(None);
+        }
+        if t.anchor.get().is_some_and(|a| !visible.contains(&a)) {
+            t.anchor.set(None);
+        }
+        t.hit_count.set(flat.hits);
+        t.rows.update_search(flat);
+        self.sync_fit(t);
+        self.update_status(t);
     }
 
     /// Expands or collapses one folder row of the search tree.
@@ -2128,12 +2241,12 @@ impl App {
         let flat = {
             let mut search = t.search.borrow_mut();
             let Some(search) = search.as_mut() else { return };
-            if !search.tree.toggle(node) {
+            if !search.options.tree || !search.tree.toggle(node) {
                 return;
             }
             let all = t.rows.entries.borrow();
             let (key, desc) = t.sort.get();
-            search.tree.flatten(&all, key, desc, SHOW_HIDDEN.load(Relaxed))
+            search.flatten(&all, key, desc)
         };
         t.hit_count.set(flat.hits);
         t.rows.apply_flat(flat);
@@ -2142,6 +2255,9 @@ impl App {
 
     /// Left/Right on a search-tree folder row; false lets normal cursor movement happen.
     fn tree_arrow(&self, t: &Tab, right: bool) -> bool {
+        if !t.search.borrow().as_ref().is_some_and(|s| s.options.tree) {
+            return false;
+        }
         let Some(row) = self.cursor_row(t) else { return false };
         let Some(node) = t.rows.entry(row) else { return false };
         let meta = t.rows.meta.borrow().get(node as usize).copied().unwrap_or_default();
@@ -2158,8 +2274,6 @@ impl App {
         if is_this_pc(&path) {
             return self.set_note(&t, "폴더에서만 검색할 수 있음".into());
         }
-        t.search_scope.set(ScopeKind::Subtree);
-        self.ui().set_search_scope(ScopeKind::Subtree.index());
         if !same_path(&t.cwd.borrow(), &path) {
             self.navigate(&t, path, Hist::Push, None);
         }
@@ -2323,7 +2437,9 @@ impl App {
         if at_this_pc(&t) {
             if background {
                 let top = [own(CMD_REFRESH, "새로 고침\tF5")];
-                if popup::show(self.hwnd(), at, &top, &[], &[]) == CMD_REFRESH {
+                let id = popup::show(self.hwnd(), at, &top, &[], &[]);
+                self.end_menu_pointer();
+                if id == CMD_REFRESH {
                     self.reload(&t, After::default());
                 }
                 return;
@@ -2393,7 +2509,9 @@ impl App {
         }
         let bottom = [own(CMD_PROPERTIES, "속성\tAlt+Enter")];
 
-        match popup::show(self.hwnd(), at, &top, items, &bottom) {
+        let id = popup::show(self.hwnd(), at, &top, items, &bottom);
+        self.end_menu_pointer();
+        match id {
             0 => {}
             id @ 1..=0x7FFF => {
                 if let Ok(seq) = seq {
@@ -2454,6 +2572,7 @@ impl App {
             Some(Ok(items)) => {
                 self.set_note(&t, String::new());
                 let id = popup::show(self.hwnd(), at, &[], &items, &[]);
+                self.end_menu_pointer();
                 if (1..=0x7FFF).contains(&id) {
                     self.invoke_shell(Request::Invoke { seq, id });
                 }
@@ -3490,7 +3609,7 @@ fn main() -> Result<(), slint::PlatformError> {
 
     ui.on_navigate(|t| app(|a| a.address(&t)));
     ui.on_search(|t| app(|a| a.search(&t)));
-    ui.on_search_scope_changed(|| app(|a| a.search_scope_changed()));
+    ui.on_search_options_changed(|| app(|a| a.search_options_changed()));
     ui.on_row_expand(|r| app(|a| a.toggle_expand(r as usize)));
     ui.on_back(|| app(|a| a.back()));
     ui.on_forward(|| app(|a| a.forward()));
@@ -3639,5 +3758,14 @@ mod tests {
         }
         assert_eq!(super::expand_env("%NO_SUCH_VAR_FEX%"), "%NO_SUCH_VAR_FEX%");
         assert_eq!(super::expand_env("100%"), "100%");
+    }
+
+    #[test]
+    fn search_option_defaults_and_service_pattern() {
+        let defaults = super::SearchOptions::default();
+        assert!(defaults.folders && defaults.files && !defaults.regex && !defaults.tree);
+        assert_eq!(super::service_pattern("*.txt", false), "*.txt");
+        assert_eq!(super::service_pattern("^a", true), "re:^a");
+        assert_eq!(super::service_pattern("re:^a", true), "re:^a");
     }
 }

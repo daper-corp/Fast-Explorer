@@ -83,16 +83,36 @@ pub struct Pattern(Inner);
 enum Inner {
     /// The whole query is one regular expression (case-insensitive unless it says otherwise).
     Regex(Regex),
-    /// Whitespace-separated words; a name must contain/match all of them.
-    Words(Vec<Word>),
+    /// Semicolon-separated OR groups; every word in a group must match.
+    Groups(Vec<Vec<Word>>),
 }
 
 impl Pattern {
     /// Compiles a query. Errors are user-facing (bad regular expression, empty query).
     pub fn compile(query: &str) -> Result<Self, String> {
+        Self::compile_mode(query, false)
+    }
+
+    /// `regex` makes the whole query one regular expression (semicolons stay literal).
+    /// Otherwise `re:` and `/.../` still opt in, and `;` separates OR groups.
+    pub fn compile_mode(query: &str, regex: bool) -> Result<Self, String> {
         let query = query.trim();
         if query.is_empty() {
             return Err("검색어가 비어 있음".into());
+        }
+        if regex {
+            let source = match query.get(..3).is_some_and(|p| p.eq_ignore_ascii_case("re:")) {
+                true => &query[3..],
+                false => query,
+            };
+            if source.trim().is_empty() {
+                return Err("검색어가 비어 있음".into());
+            }
+            let re = RegexBuilder::new(source)
+                .case_insensitive(true)
+                .build()
+                .map_err(|e| format!("정규식 오류: {e}"))?;
+            return Ok(Pattern(Inner::Regex(re)));
         }
         if let Some(source) = regex_source(query) {
             if source.trim().is_empty() {
@@ -104,24 +124,31 @@ impl Pattern {
                 .map_err(|e| format!("정규식 오류: {e}"))?;
             return Ok(Pattern(Inner::Regex(re)));
         }
-        let words: Vec<Word> = query
-            .split_whitespace()
-            .map(|w| match w.contains(['*', '?']) {
-                true => Word::Glob(Glob::new(w)),
-                false => Word::Sub(Substring::new(w)),
-            })
+        let groups: Vec<Vec<Word>> = query
+            .split(';')
+            .map(str::trim)
+            .filter(|g| !g.is_empty())
+            .map(|g| g.split_whitespace().map(word).collect())
+            .filter(|g: &Vec<Word>| !g.is_empty())
             .collect();
-        match words.is_empty() {
+        match groups.is_empty() {
             true => Err("검색어가 비어 있음".into()),
-            false => Ok(Pattern(Inner::Words(words))),
+            false => Ok(Pattern(Inner::Groups(groups))),
         }
     }
 
     pub fn matches(&self, name: &str) -> bool {
         match &self.0 {
             Inner::Regex(re) => re.is_match(name),
-            Inner::Words(words) => words.iter().all(|w| w.matches(name)),
+            Inner::Groups(groups) => groups.iter().any(|g| g.iter().all(|w| w.matches(name))),
         }
+    }
+}
+
+fn word(text: &str) -> Word {
+    match text.contains(['*', '?']) {
+        true => Word::Glob(Glob::new(text)),
+        false => Word::Sub(Substring::new(text)),
     }
 }
 
@@ -295,12 +322,18 @@ pub struct Plan {
 /// A query with a path in it (`C:\dir\*.txt`, `sub\report`) searches that folder instead of
 /// the chosen scope; the last path component is the name pattern (`*` when empty).
 pub fn plan(query: &str, cwd: &Path, scope: &Scope) -> Result<Plan, String> {
+    plan_mode(query, cwd, scope, false)
+}
+
+/// Like [`plan`], with `regex` forcing the whole query to be one regular expression; a regex
+/// is never treated as a path, even when it contains slashes.
+pub fn plan_mode(query: &str, cwd: &Path, scope: &Scope, regex: bool) -> Result<Plan, String> {
     let query = query.trim();
     if query.is_empty() {
         return Err("검색어가 비어 있음".into());
     }
     // A regular expression is never a path, even when it contains slashes.
-    if regex_source(query).is_some() {
+    if regex || regex_source(query).is_some() {
         return Ok(Plan { scope: scope.clone(), pattern: query.to_string() });
     }
     // The whole query may be an existing folder (including names with spaces); check it
@@ -462,6 +495,47 @@ mod tests {
         assert!(matches("a*", "abc"));
         assert!(matches("*c", "abc"));
         assert!(!matches("a*c", "ab"));
+    }
+
+    #[test]
+    fn semicolons_are_or_groups() {
+        assert!(matches("*.txt;*.md", "notes.txt"));
+        assert!(matches("*.txt;*.md", "notes.MD"));
+        assert!(!matches("*.txt;*.md", "notes.doc"));
+        assert!(matches("보고서;초안", "최종 보고서.hwp"));
+        assert!(matches("보고서;초안", "초안.hwp"));
+        assert!(!matches("보고서;초안", "메모.hwp"));
+        // Whitespace inside a group is still AND.
+        assert!(matches("보고서 2024", "2024-보고서.hwp"));
+        assert!(!matches("보고서 2024", "보고서.hwp"));
+        assert!(!matches("보고서 2024", "2024.hwp"));
+        // a OR (b AND c)
+        assert!(matches("a;b c", "a.txt"));
+        assert!(!matches("a;b c", "b.txt"));
+        assert!(matches("a;b c", "bc.txt"));
+        assert!(Pattern::compile(";;").is_err());
+    }
+
+    #[test]
+    fn regex_mode_is_explicit() {
+        assert!(Pattern::compile_mode(r"^report.*\.docx$", true).unwrap().matches("Report 2024.docx"));
+        assert!(!Pattern::compile_mode(r"^report.*\.docx$", true).unwrap().matches("old-report.docx"));
+        // In regex mode a semicolon is literal, not an OR separator.
+        assert!(Pattern::compile_mode("a;b", true).unwrap().matches("xa;by"));
+        assert!(Pattern::compile_mode("^a;b$", true).unwrap().matches("a;b"));
+        assert!(!Pattern::compile_mode("^a;b$", false).unwrap().matches("a;b"));
+        // The legacy prefix is stripped when the toggle is already on.
+        assert!(Pattern::compile_mode("re:^a", true).unwrap().matches("abc"));
+        assert!(Pattern::compile_mode("re:(", true).unwrap_err().starts_with("정규식 오류"));
+    }
+
+    #[test]
+    fn regex_mode_plan_keeps_slashes() {
+        let cwd = PathBuf::from(r"C:\Users\hp");
+        let scope = Scope::Under(cwd.clone());
+        let p = plan_mode(r"^C:/Users/.*", &cwd, &scope, true).unwrap();
+        assert_eq!(p.scope, scope);
+        assert_eq!(p.pattern, r"^C:/Users/.*");
     }
 
     #[test]

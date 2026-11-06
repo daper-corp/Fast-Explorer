@@ -150,14 +150,45 @@ impl SearchTree {
         true
     }
 
-    /// Flattens the expanded, non-empty part of the tree for display.
-    pub fn flatten(&self, entries: &[Entry], key: SortKey, desc: bool, show_hidden: bool) -> FlatTree {
+    /// Flattens the expanded, non-empty part of the tree for display. In `flat` mode only
+    /// matching items are shown, in one sorted list; otherwise matching folders are kept as
+    /// expandable context around their hits.
+    #[allow(clippy::too_many_arguments)]
+    pub fn flatten(
+        &self,
+        entries: &[Entry],
+        key: SortKey,
+        desc: bool,
+        show_hidden: bool,
+        show_folders: bool,
+        show_files: bool,
+        tree: bool,
+    ) -> FlatTree {
         let mut flat = FlatTree {
             order: Vec::new(),
             metas: vec![RowMeta::default(); self.nodes.len()],
             locations: vec![String::new(); self.nodes.len()],
             hits: 0,
         };
+        if !tree {
+            let mut nodes: Vec<u32> = (0..self.nodes.len() as u32)
+                .filter(|&node| {
+                    let n = &self.nodes[node as usize];
+                    n.hit && visible(&entries[node as usize], show_hidden, show_folders, show_files)
+                })
+                .collect();
+            sort_nodes(&mut nodes, entries, key, desc);
+            for &node in &nodes {
+                flat.locations[node as usize] = self.nodes[node as usize]
+                    .path
+                    .parent()
+                    .map(|p| p.display().to_string())
+                    .unwrap_or_default();
+            }
+            flat.hits = nodes.len();
+            flat.order = nodes;
+            return flat;
+        }
         let mut roots = self.roots.clone();
         sort_nodes(&mut roots, entries, key, desc);
         for root in roots {
@@ -168,6 +199,8 @@ impl SearchTree {
                 key,
                 desc,
                 show_hidden,
+                show_folders,
+                show_files,
                 &mut flat.order,
                 &mut flat.metas,
                 &mut flat.locations,
@@ -188,6 +221,8 @@ impl SearchTree {
         key: SortKey,
         desc: bool,
         show_hidden: bool,
+        show_folders: bool,
+        show_files: bool,
         order: &mut Vec<u32>,
         metas: &mut [RowMeta],
         locations: &mut [String],
@@ -199,13 +234,25 @@ impl SearchTree {
         let mut child_hits = 0;
         let mut any_visible = false;
         for kid in kids {
-            let (visible, hits) = self.collect(kid, depth + 1, entries, key, desc, show_hidden, &mut kid_order, metas, locations);
+            let (visible, hits) = self.collect(
+                kid,
+                depth + 1,
+                entries,
+                key,
+                desc,
+                show_hidden,
+                show_folders,
+                show_files,
+                &mut kid_order,
+                metas,
+                locations,
+            );
             if visible {
                 any_visible = true;
                 child_hits += hits;
             }
         }
-        let self_hit = n.hit && shown(&entries[node as usize], show_hidden);
+        let self_hit = n.hit && visible(&entries[node as usize], show_hidden, show_folders, show_files);
         if !self_hit && !any_visible {
             return (false, 0);
         }
@@ -217,6 +264,10 @@ impl SearchTree {
         }
         (true, child_hits + self_hit as usize)
     }
+}
+
+fn visible(e: &Entry, show_hidden: bool, show_folders: bool, show_files: bool) -> bool {
+    shown(e, show_hidden) && if e.is_dir() { show_folders } else { show_files }
 }
 
 fn shown(e: &Entry, show_hidden: bool) -> bool {
@@ -290,7 +341,7 @@ mod tests {
     #[test]
     fn keeps_only_folders_with_matches() {
         let (tree, entries) = sample();
-        let flat = tree.flatten(&entries, SortKey::Name, false, false);
+        let flat = tree.flatten(&entries, SortKey::Name, false, false, true, true, true);
         assert_eq!(names(&tree, &entries, &flat), ["C:", "a", "b", "two.txt", "one.txt", "c", "three.txt"]);
         assert_eq!(flat.hits, 3); // hidden.txt is hidden
         let depths: Vec<u16> = flat.order.iter().map(|&i| flat.metas[i as usize].depth).collect();
@@ -303,11 +354,11 @@ mod tests {
     #[test]
     fn collapsing_hides_children_but_keeps_them_counted() {
         let (mut tree, entries) = sample();
-        let flat = tree.flatten(&entries, SortKey::Name, false, false);
+        let flat = tree.flatten(&entries, SortKey::Name, false, false, true, true, true);
         // "b" is the third row.
         let b = flat.order[2];
         assert!(tree.toggle(b));
-        let flat = tree.flatten(&entries, SortKey::Name, false, false);
+        let flat = tree.flatten(&entries, SortKey::Name, false, false, true, true, true);
         assert_eq!(names(&tree, &entries, &flat), ["C:", "a", "b", "one.txt", "c", "three.txt"]);
         assert_eq!(flat.hits, 3);
         assert!(!flat.metas[b as usize].expanded);
@@ -320,10 +371,10 @@ mod tests {
         let base = Path::new(r"C:\");
         tree.root(&mut entries, base);
         tree.insert(&mut entries, Path::new(r"C:\only\hidden.txt"), false, Some(entry("hidden.txt", false, FILE_ATTRIBUTE_HIDDEN)), Some(base));
-        let flat = tree.flatten(&entries, SortKey::Name, false, false);
+        let flat = tree.flatten(&entries, SortKey::Name, false, false, true, true, true);
         assert!(flat.order.is_empty());
         assert_eq!(flat.hits, 0);
-        let flat = tree.flatten(&entries, SortKey::Name, false, true);
+        let flat = tree.flatten(&entries, SortKey::Name, false, true, true, true, true);
         assert_eq!(names(&tree, &entries, &flat), ["C:", "only", "hidden.txt"]);
         assert_eq!(flat.hits, 1);
     }
@@ -334,8 +385,43 @@ mod tests {
         let mut entries = Vec::new();
         tree.insert(&mut entries, Path::new(r"C:\x\a.txt"), false, Some(entry("a.txt", false, 0)), None);
         tree.insert(&mut entries, Path::new(r"D:\y\b.txt"), false, Some(entry("b.txt", false, 0)), None);
-        let flat = tree.flatten(&entries, SortKey::Name, false, false);
+        let flat = tree.flatten(&entries, SortKey::Name, false, false, true, true, true);
         assert_eq!(names(&tree, &entries, &flat), ["C:", "x", "a.txt", "D:", "y", "b.txt"]);
         assert_eq!(flat.hits, 2);
+    }
+
+    #[test]
+    fn flat_view_lists_only_hits_without_context() {
+        let (tree, entries) = sample();
+        let flat = tree.flatten(&entries, SortKey::Name, false, false, true, true, false);
+        assert_eq!(names(&tree, &entries, &flat), ["one.txt", "three.txt", "two.txt"]);
+        assert_eq!(flat.hits, 3);
+        assert!(flat.order.iter().all(|&n| flat.metas[n as usize].depth == 0));
+        assert!(flat.order.iter().all(|&n| !flat.metas[n as usize].expandable));
+        assert_eq!(flat.locations[flat.order[0] as usize], r"C:\a");
+    }
+
+    #[test]
+    fn folder_and_file_filters_keep_context_stubs() {
+        let (mut tree, mut entries) = sample();
+        tree.insert(
+            &mut entries,
+            Path::new(r"C:\hits\folder"),
+            true,
+            Some(entry("folder", true, 0)),
+            Some(Path::new(r"C:\")),
+        );
+
+        let files = tree.flatten(&entries, SortKey::Name, false, false, false, true, true);
+        assert_eq!(names(&tree, &entries, &files), ["C:", "a", "b", "two.txt", "one.txt", "c", "three.txt"]);
+        assert_eq!(files.hits, 3);
+
+        let folders = tree.flatten(&entries, SortKey::Name, false, false, true, false, true);
+        assert_eq!(names(&tree, &entries, &folders), ["C:", "hits", "folder"]);
+        assert_eq!(folders.hits, 1);
+
+        let flat = tree.flatten(&entries, SortKey::Name, false, false, false, true, false);
+        assert_eq!(names(&tree, &entries, &flat), ["one.txt", "three.txt", "two.txt"]);
+        assert_eq!(flat.hits, 3);
     }
 }
