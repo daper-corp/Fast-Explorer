@@ -1,23 +1,24 @@
 #![cfg_attr(not(debug_assertions), windows_subsystem = "windows")]
 
 use std::cell::{Cell, OnceCell, RefCell};
-use std::collections::HashSet;
+use std::collections::{HashMap, HashSet};
 use std::io;
 use std::path::PathBuf;
 use std::rc::Rc;
-use std::sync::Arc;
-use std::sync::atomic::{AtomicU64, Ordering::SeqCst};
+use std::sync::{Arc, mpsc};
+use std::sync::atomic::{AtomicBool, AtomicU64, Ordering::Relaxed, Ordering::SeqCst};
 use std::thread;
 use std::time::{Duration, Instant};
 
 use fex_core::content;
+use fex_core::icons::{self, IconKey};
 use fex_core::index::{self, QueryError, Results};
 use fex_core::menu::{HANG_LIMIT, MenuHost, MenuItem, MenuResult, Request};
 use fex_core::shell::{self, Op};
 use fex_core::{Entry, SortKey, format_filetime, format_size, list_dir, sort_order};
 use popup::{Own, SEP, own};
 use slint::platform::Key;
-use slint::{ComponentHandle, Model, ModelNotify, ModelRc, ModelTracker, SharedString, VecModel};
+use slint::{ComponentHandle, Model, ModelNotify, ModelRc, ModelTracker, Rgba8Pixel, SharedPixelBuffer, SharedString, VecModel};
 use windows::Win32::Foundation::{HWND, POINT};
 use windows::Win32::Graphics::Gdi::ClientToScreen;
 use windows::Win32::UI::WindowsAndMessaging::{AllowSetForegroundWindow, GetCursorPos};
@@ -40,6 +41,7 @@ const CMD_NEW_FOLDER: u32 = 0x800A;
 const CMD_REFRESH: u32 = 0x800B;
 const CMD_MORE: u32 = 0x800C;
 const CMD_RETRY: u32 = 0x800D;
+const CMD_NEW_FILE: u32 = 0x800E;
 
 /// How long a right-click waits for a shell menu that isn't prefetched yet.
 const MENU_WAIT: Duration = Duration::from_millis(150);
@@ -72,8 +74,14 @@ struct Rows {
     editing: Cell<Option<u32>>,
     /// Folder of each entry, for search hits (empty when listing a folder).
     locations: RefCell<Vec<String>>,
+    /// The folder being listed (for icons that come from the file itself).
+    base: RefCell<PathBuf>,
     notify: ModelNotify,
 }
+
+/// View options shared by every tab (initially Explorer's own settings).
+static SHOW_HIDDEN: AtomicBool = AtomicBool::new(false);
+static SHOW_EXT: AtomicBool = AtomicBool::new(true);
 
 impl Model for Rows {
     type Data = Row;
@@ -86,11 +94,20 @@ impl Model for Rows {
         let i = *self.order.borrow().get(row)?;
         let entries = self.entries.borrow();
         let e = &entries[i as usize];
-        let name = e.name();
+        let ext = e.extension();
+        let mut name = e.name();
+        // Like Explorer with extensions hidden: "report" for "report.txt" (folders keep dots).
+        if !SHOW_EXT.load(Relaxed) && !e.is_dir() && !ext.is_empty() {
+            name.truncate(name.len() - ext.len() - 1);
+        }
         let stem = match name.rfind('.') {
             Some(p) if p > 0 && !e.is_dir() => p,
             _ => name.len(),
         };
+        let icon = icon_image(IconKey::for_entry(e.is_dir(), &ext, || match self.locations.borrow().get(i as usize) {
+            Some(dir) => PathBuf::from(dir).join(e.os_name()),
+            None => self.base.borrow().join(e.os_name()),
+        }));
         let kind = match (e.is_dir(), e.extension()) {
             (true, _) => "파일 폴더".to_string(),
             (false, x) if x.is_empty() => "파일".to_string(),
@@ -105,6 +122,7 @@ impl Model for Rows {
             stem: stem as i32,
             name: name.into(),
             location: self.locations.borrow().get(i as usize).map(|s| s.as_str().into()).unwrap_or_default(),
+            icon,
         })
     }
 
@@ -149,23 +167,52 @@ impl Rows {
         self.order.borrow().iter().copied().filter(|&i| sel[i as usize]).collect()
     }
 
-    fn select_only(&self, idx: Option<u32>) {
-        let mut sel = self.selected.borrow_mut();
-        sel.fill(false);
-        if let Some(i) = idx {
-            sel[i as usize] = true;
+    /// Changes the selection and repaints only the rows that changed. Resetting the whole model
+    /// would rebuild the row widgets under the mouse and lose a double-click in progress.
+    fn update_selection(&self, change: impl FnOnce(&mut Vec<bool>)) {
+        let before = self.selected.borrow().clone();
+        change(&mut self.selected.borrow_mut());
+        let changed: Vec<usize> = {
+            let after = self.selected.borrow();
+            (0..after.len()).filter(|&i| before.get(i) != after.get(i)).collect()
+        };
+        if changed.len() > 2000 {
+            return self.notify.reset(); // e.g. select all: cheaper than thousands of updates
+        }
+        let mut row_of = vec![usize::MAX; before.len()];
+        for (r, &i) in self.order.borrow().iter().enumerate() {
+            row_of[i as usize] = r;
+        }
+        for i in changed {
+            if let Some(&r) = row_of.get(i).filter(|&&r| r != usize::MAX) {
+                self.notify.row_changed(r);
+            }
         }
     }
 
-    fn select_range(&self, a: usize, b: usize, add: bool) {
-        let order = self.order.borrow();
-        let mut sel = self.selected.borrow_mut();
-        if !add {
+    fn select_only(&self, idx: Option<u32>) {
+        self.update_selection(|sel| {
             sel.fill(false);
-        }
-        for r in a.min(b)..=a.max(b) {
-            sel[order[r] as usize] = true;
-        }
+            if let Some(i) = idx {
+                sel[i as usize] = true;
+            }
+        });
+    }
+
+    fn toggle(&self, idx: u32) {
+        self.update_selection(|sel| sel[idx as usize] = !sel[idx as usize]);
+    }
+
+    fn select_range(&self, a: usize, b: usize, add: bool) {
+        let range: Vec<u32> = self.order.borrow()[a.min(b)..=a.max(b)].to_vec();
+        self.update_selection(|sel| {
+            if !add {
+                sel.fill(false);
+            }
+            for i in range {
+                sel[i as usize] = true;
+            }
+        });
     }
 }
 
@@ -476,6 +523,7 @@ impl App {
                 Hist::Push => {}
             }
         }
+        *t.rows.base.borrow_mut() = path.clone();
         *t.cwd.borrow_mut() = path;
         if self.is_active(t) {
             self.ui().set_list_y(0.0);
@@ -494,9 +542,11 @@ impl App {
             let start = entries.len();
             Arc::make_mut(&mut entries).extend(batch);
             let end = entries.len();
-            rows.order.borrow_mut().extend(start as u32..end as u32);
+            let mut order = rows.order.borrow_mut();
+            let first = order.len();
+            order.extend((start as u32..end as u32).filter(|&i| shown(&entries[i as usize])));
             rows.selected.borrow_mut().resize(end, false);
-            (start, end - start)
+            (first, order.len() - first)
         };
         rows.notify.row_added(start, n);
         self.update_status(&t);
@@ -521,19 +571,26 @@ impl App {
         t.bump_sort();
         let seq = t.sort_gen.get();
         let entries = t.rows.entries.borrow().clone();
+        // Identifies the list being sorted. (The order's length can't: hidden items are left out.)
+        let sorting = (Arc::as_ptr(&entries) as usize, entries.len());
         let (key, desc) = t.sort.get();
         let id = t.id;
         thread::spawn(move || {
             let start = Instant::now();
-            let order = sort_order(&entries, key, desc);
+            let order = display_order(&entries, key, desc);
             let took = start.elapsed();
-            post(move |a| a.sorted(id, seq, order, took));
+            post(move |a| a.sorted(id, seq, sorting, order, took));
         });
     }
 
-    fn sorted(&self, id: u64, seq: u64, order: Vec<u32>, took: Duration) {
+    fn sorted(&self, id: u64, seq: u64, sorting: (usize, usize), order: Vec<u32>, took: Duration) {
         let Some(t) = self.find(id) else { return };
-        if seq != t.sort_gen.get() || order.len() != t.rows.entries.borrow().len() {
+        let current = {
+            let entries = t.rows.entries.borrow();
+            (Arc::as_ptr(&entries) as usize, entries.len())
+        };
+        // Stale if the user navigated or sorted again, or entries changed while sorting.
+        if seq != t.sort_gen.get() || sorting != current {
             return;
         }
         *t.rows.order.borrow_mut() = order;
@@ -565,7 +622,7 @@ impl App {
                 cancel.load(SeqCst) == epoch
             });
             let took = start.elapsed();
-            let order = sort_order(&all, key, desc);
+            let order = display_order(&all, key, desc);
             post(move |a| a.reloaded(id, epoch, all, order, took, res.err()));
         });
     }
@@ -639,15 +696,13 @@ impl App {
             let anchor = t.anchor.get().and_then(|a| t.rows.row_of(a)).unwrap_or(row);
             t.rows.select_range(anchor, row, ctrl);
         } else if ctrl {
-            let mut sel = t.rows.selected.borrow_mut();
-            sel[idx as usize] = !sel[idx as usize];
+            t.rows.toggle(idx);
             t.anchor.set(Some(idx));
         } else {
             t.rows.select_only(Some(idx));
             t.anchor.set(Some(idx));
         }
         t.cursor.set(Some(idx));
-        t.rows.notify.reset();
         self.update_status(&t);
     }
 
@@ -666,7 +721,6 @@ impl App {
             t.anchor.set(Some(idx));
         }
         t.cursor.set(Some(idx));
-        t.rows.notify.reset();
         self.ensure_visible(row);
         self.update_status(t);
     }
@@ -737,8 +791,7 @@ impl App {
             _ if is(Key::Backspace) => self.back(),
             _ if ctrl && shift && ch == 'n' => self.new_folder(),
             _ if ctrl && ch == 'a' => {
-                t.rows.selected.borrow_mut().fill(true);
-                t.rows.notify.reset();
+                t.rows.update_selection(|sel| sel.fill(true));
                 self.update_status(&t);
             }
             _ if ctrl && ch == 'c' => self.copy(false),
@@ -748,10 +801,8 @@ impl App {
             _ if is(Key::F2) => self.start_rename(),
             _ if ctrl && ch == ' ' => {
                 if let Some(c) = t.cursor.get() {
-                    let mut sel = t.rows.selected.borrow_mut();
-                    sel[c as usize] = !sel[c as usize];
+                    t.rows.toggle(c);
                 }
-                t.rows.notify.reset();
                 self.update_status(&t);
             }
             _ if is(Key::UpArrow) || is(Key::DownArrow) || is(Key::Home) || is(Key::End)
@@ -930,7 +981,7 @@ impl App {
         t.epoch.fetch_add(1, SeqCst); // drop any folder listing still arriving
         t.pending.take();
         let (key, desc) = t.sort.get();
-        let order = sort_order(&entries, key, desc);
+        let order = display_order(&entries, key, desc);
         let paths: Vec<PathBuf> = res.hits.into_iter().map(|h| h.path).collect();
         let locations = paths.iter().map(|p| p.parent().map(|d| d.display().to_string()).unwrap_or_default()).collect();
         t.bump_sort();
@@ -1187,7 +1238,6 @@ impl App {
         if !t.rows.selected.borrow()[i as usize] {
             t.rows.select_only(Some(i));
             t.anchor.set(Some(i));
-            t.rows.notify.reset();
         }
         t.cursor.set(Some(i));
         self.update_status(&t);
@@ -1199,7 +1249,6 @@ impl App {
     fn blank_pressed(&self, right: bool) {
         let t = self.tab();
         t.rows.select_only(None);
-        t.rows.notify.reset();
         self.update_status(&t);
         if right {
             let at = cursor_pos();
@@ -1243,6 +1292,7 @@ impl App {
             vec![
                 Own { disabled: !shell::clipboard_has_files(), ..own(CMD_PASTE, "붙여넣기\tCtrl+V") },
                 own(CMD_NEW_FOLDER, "새 폴더\tCtrl+Shift+N"),
+                own(CMD_NEW_FILE, "새 텍스트 문서"),
                 own(CMD_REFRESH, "새로 고침\tF5"),
             ]
         } else {
@@ -1297,6 +1347,7 @@ impl App {
             CMD_DELETE => self.delete(false),
             CMD_PASTE => self.paste(),
             CMD_NEW_FOLDER => self.new_folder(),
+            CMD_NEW_FILE => self.new_file(),
             CMD_REFRESH => self.reload(&t, After::default()),
             CMD_PROPERTIES => self.properties_of(paths),
             _ => {}
@@ -1449,27 +1500,81 @@ impl App {
         let Some(idx) = t.rows.editing.take() else { return };
         t.rows.notify.reset();
         self.ui().invoke_focus_list();
-        let (old, new) = (t.rows.name(idx), text.trim());
+        let (old, ext) = (t.rows.name(idx), t.rows.entries.borrow()[idx as usize].extension());
+        let mut new = text.trim().to_string();
+        // With extensions hidden the box held only the stem; keep the extension, like Explorer.
+        if !new.is_empty() && !SHOW_EXT.load(Relaxed) && !t.rows.is_dir(idx) && !ext.is_empty() {
+            new = format!("{new}.{ext}");
+        }
         if commit && !new.is_empty() && new != old {
-            let (path, new) = (t.path_of(idx), new.to_string());
+            let path = t.path_of(idx);
             let after = After { select: vec![new.clone()], rename: false };
             self.run_op(&t, after, move |hwnd| shell::rename(&path, &new, Some(hwnd)));
         }
     }
 
     fn new_folder(&self) {
+        self.new_item(shell::new_folder);
+    }
+
+    fn new_file(&self) {
+        self.new_item(shell::new_text_file);
+    }
+
+    /// Creates the item on a worker, then selects it with its name ready to edit.
+    fn new_item(&self, create: fn(&std::path::Path) -> io::Result<String>) {
         let t = self.tab();
+        if t.search.borrow().is_some() {
+            return self.set_note(&t, "검색 결과에서는 새로 만들 수 없음".into());
+        }
+        self.ui().invoke_focus_list();
         let (id, dir) = (t.id, t.cwd.borrow().clone());
         thread::spawn(move || {
-            let r = shell::new_folder(&dir);
+            let r = create(&dir);
             post(move |a| {
                 let Some(t) = a.find(id) else { return };
                 match r {
                     Ok(name) => a.reload(&t, After { select: vec![name], rename: true }),
-                    Err(e) => a.set_note(&t, format!("새 폴더 실패: {e}")),
+                    Err(e) => a.set_note(&t, format!("만들 수 없음: {e}")),
                 }
             });
         });
+    }
+
+    /// "숨긴 항목" / "파일 확장명" toggled: re-filter and redraw every tab.
+    fn view_changed(&self) {
+        let ui = self.ui();
+        SHOW_HIDDEN.store(ui.get_show_hidden(), Relaxed);
+        SHOW_EXT.store(ui.get_show_ext(), Relaxed);
+        for t in self.tabs.borrow().iter() {
+            self.resort(t);
+        }
+        ui.invoke_focus_list();
+    }
+
+    fn icon_loaded(&self, key: IconKey, px: Option<icons::Pixels>) {
+        let img = px.map(|p| slint::Image::from_rgba8(SharedPixelBuffer::<Rgba8Pixel>::clone_from_slice(&p.rgba, p.width, p.height)));
+        let schedule = ICONS.with(|c| {
+            let mut c = c.borrow_mut();
+            c.pending.remove(&key);
+            c.images.insert(key, img);
+            !std::mem::replace(&mut c.refresh_due, true)
+        });
+        if schedule {
+            // Icons arrive in bursts: redraw the visible rows once per burst.
+            slint::Timer::single_shot(Duration::from_millis(30), || app(|a| a.refresh_visible()));
+        }
+    }
+
+    fn refresh_visible(&self) {
+        ICONS.with(|c| c.borrow_mut().refresh_due = false);
+        let (ui, t) = (self.ui(), self.tab());
+        let h = ui.get_row_height().max(1.0);
+        let first = (-ui.get_list_y() / h).max(0.0) as usize;
+        let last = (first + (ui.get_list_height() / h) as usize + 2).min(t.rows.len());
+        for r in first..last {
+            t.rows.notify.row_changed(r);
+        }
     }
 
     /// Runs a file operation on a worker (it may show dialogs), then refreshes the tab.
@@ -1489,6 +1594,63 @@ impl App {
             });
         });
     }
+}
+
+fn shown(e: &Entry) -> bool {
+    const FILE_ATTRIBUTE_HIDDEN: u32 = 0x2;
+    SHOW_HIDDEN.load(Relaxed) || e.attrs & FILE_ATTRIBUTE_HIDDEN == 0
+}
+
+/// Sorted display order, without hidden items unless "숨긴 항목" is on.
+fn display_order(entries: &[Entry], key: SortKey, desc: bool) -> Vec<u32> {
+    let mut order = sort_order(entries, key, desc);
+    order.retain(|&i| shown(&entries[i as usize]));
+    order
+}
+
+/// Icons already loaded (None: the shell had none), and the ones on their way.
+#[derive(Default)]
+struct IconCache {
+    images: HashMap<IconKey, Option<slint::Image>>,
+    pending: HashSet<IconKey>,
+    tx: Option<mpsc::Sender<IconKey>>,
+    refresh_due: bool,
+}
+
+thread_local! {
+    static ICONS: RefCell<IconCache> = RefCell::default();
+}
+
+/// The icon for `key` if loaded; otherwise asks the icon thread for it and returns a blank
+/// (the row is redrawn when it arrives).
+fn icon_image(key: IconKey) -> slint::Image {
+    ICONS.with(|c| {
+        let mut c = c.borrow_mut();
+        if let Some(img) = c.images.get(&key) {
+            return img.clone().unwrap_or_default();
+        }
+        if c.pending.insert(key.clone())
+            && let Some(tx) = &c.tx
+        {
+            let _ = tx.send(key);
+        }
+        slint::Image::default()
+    })
+}
+
+/// Shell icons are read on their own thread: some need the file itself (exe, lnk), and
+/// shell handlers may be slow. ponytail: one thread and an unbounded cache; add an LRU if
+/// folders full of distinct .exe icons ever matter.
+fn start_icon_worker() {
+    let (tx, rx) = mpsc::channel::<IconKey>();
+    thread::spawn(move || {
+        icons::init_thread();
+        for key in rx {
+            let px = icons::load(&key);
+            post(move |a| a.icon_loaded(key, px));
+        }
+    });
+    ICONS.with(|c| c.borrow_mut().tx = Some(tx));
 }
 
 /// A search hit as a list entry, with size/date/attributes read from the file system.
@@ -1521,6 +1683,13 @@ fn main() -> Result<(), slint::PlatformError> {
         }
     }));
     host.warm_up(); // loading shell extensions takes seconds the first time; do it now
+
+    let (show_hidden, show_ext) = shell::explorer_view();
+    SHOW_HIDDEN.store(show_hidden, Relaxed);
+    SHOW_EXT.store(show_ext, Relaxed);
+    ui.set_show_hidden(show_hidden);
+    ui.set_show_ext(show_ext);
+    start_icon_worker();
 
     APP.with(|a| {
         let _ = a.set(App {
@@ -1561,6 +1730,13 @@ fn main() -> Result<(), slint::PlatformError> {
     ui.on_row_menu(|r| app(|a| a.row_menu(r as usize)));
     ui.on_row_hover(|r| app(|a| a.row_hover(r as usize)));
     ui.on_blank_pressed(|right| app(|a| a.blank_pressed(right)));
+    ui.on_new_folder(|| app(|a| a.new_folder()));
+    ui.on_new_file(|| app(|a| a.new_file()));
+    ui.on_delete_selected(|| app(|a| {
+        a.ui().invoke_focus_list();
+        a.delete(false);
+    }));
+    ui.on_view_changed(|| app(|a| a.view_changed()));
     ui.on_key(|e, in_list| {
         app(|a| a.key(&e.text, e.modifiers.control, e.modifiers.shift, e.modifiers.alt, in_list))
     });

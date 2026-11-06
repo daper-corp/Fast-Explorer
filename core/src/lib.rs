@@ -1,6 +1,7 @@
 //! Fex core: UI-independent engine (directory listing, sorting, formatting, shell actions).
 
 pub mod content;
+pub mod icons;
 pub mod index;
 pub mod menu;
 pub mod shell;

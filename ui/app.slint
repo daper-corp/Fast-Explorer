@@ -1,4 +1,4 @@
-import { LineEdit, Button, ListView, Palette } from "std-widgets.slint";
+import { LineEdit, Button, CheckBox, ListView, Palette } from "std-widgets.slint";
 
 export struct Row {
     name: string,
@@ -11,6 +11,7 @@ export struct Row {
     stem: int,
     // Folder of a search hit; empty when browsing a folder.
     location: string,
+    icon: image,
 }
 
 export struct TabInfo {
@@ -51,6 +52,7 @@ component HeaderCell inherits Rectangle {
 export component AppWindow inherits Window {
     in property <string> folder;
     title: root.folder == "" ? "Fast Explorer" : root.folder + " - Fast Explorer";
+    icon: @image-url("assets/icon-256.png");
     preferred-width: 1100px;
     preferred-height: 720px;
     background: Palette.background;
@@ -63,6 +65,8 @@ export component AppWindow inherits Window {
     in property <string> status;
     in property <bool> search-mode;
     in-out property <string> search-text;
+    in-out property <bool> show-hidden;
+    in-out property <bool> show-ext;
     in property <bool> can-back;
     in property <bool> can-forward;
     in property <int> sort-column;
@@ -89,6 +93,10 @@ export component AppWindow inherits Window {
     callback row-hover(int);
     callback blank-pressed(bool);  // true = right button
     callback rename-done(string, bool);
+    callback new-folder();
+    callback new-file();
+    callback delete-selected();
+    callback view-changed();
     // `in-list` is true when the file list has focus; otherwise only global shortcuts apply.
     callback key(KeyEvent, bool) -> bool;
 
@@ -119,17 +127,29 @@ export component AppWindow inherits Window {
         }
 
         VerticalLayout {
-            // Tabs
+            // Tabs: the active one is joined to the page below it (same background, accent line,
+            // bold title); the others sit back on the darker strip.
+            Rectangle {
+                height: 40px;
+                background: Palette.alternate-background;
             HorizontalLayout {
-                height: 36px;
-                padding: 4px;
-                padding-bottom: 0;
+                padding-left: 6px;
+                padding-top: 6px;
                 spacing: 2px;
                 alignment: start;
                 for t[i] in root.tabs: Rectangle {
                     width: 200px;
-                    border-radius: 6px;
-                    background: i == root.active-tab ? Palette.alternate-background : tab-touch.has-hover ? Palette.foreground.transparentize(0.95) : transparent;
+                    border-top-left-radius: 8px;
+                    border-top-right-radius: 8px;
+                    background: i == root.active-tab ? Palette.background : tab-touch.has-hover ? Palette.foreground.transparentize(0.92) : transparent;
+                    Rectangle {
+                        x: 10px;
+                        y: 0;
+                        width: parent.width - 20px;
+                        height: 2px;
+                        border-radius: 1px;
+                        background: i == root.active-tab ? Palette.accent-background : transparent;
+                    }
                     tab-touch := TouchArea {
                         pointer-event(e) => {
                             if e.kind == PointerEventKind.down && e.button == PointerEventButton.left {
@@ -141,19 +161,29 @@ export component AppWindow inherits Window {
                         }
                     }
                     HorizontalLayout {
-                        padding-left: 12px;
+                        padding-left: 10px;
                         padding-right: 4px;
+                        spacing: 6px;
+                        Image {
+                            width: 16px;
+                            source: @image-url("assets/icon-32.png");
+                            image-fit: contain;
+                            opacity: i == root.active-tab ? 1 : 0.6;
+                        }
                         Text {
                             text: t.title;
                             overflow: elide;
                             vertical-alignment: center;
                             horizontal-stretch: 1;
-                            color: Palette.foreground;
+                            font-weight: i == root.active-tab ? 600 : 400;
+                            color: i == root.active-tab ? Palette.foreground : root.dim;
                         }
                         Rectangle {
                             width: 24px;
                             border-radius: 4px;
                             background: close-touch.has-hover ? Palette.foreground.transparentize(0.9) : transparent;
+                            // Close button: always on the active tab, on hover for the others.
+                            opacity: i == root.active-tab || tab-touch.has-hover || close-touch.has-hover ? 1 : 0;
                             Text {
                                 text: "×";
                                 font-size: 16px;
@@ -182,6 +212,7 @@ export component AppWindow inherits Window {
                         }
                     }
                 }
+            }
             }
 
             // Navigation + address bar
@@ -220,6 +251,49 @@ export component AppWindow inherits Window {
                     text <=> root.search-text;
                     edited(t) => {
                         root.search(t);
+                    }
+                }
+            }
+
+            // Command bar
+            HorizontalLayout {
+                padding-left: 6px;
+                padding-right: 10px;
+                padding-bottom: 4px;
+                spacing: 4px;
+                Button {
+                    text: "새 폴더";
+                    clicked => {
+                        root.new-folder();
+                    }
+                }
+                Button {
+                    text: "새 텍스트 문서";
+                    clicked => {
+                        root.new-file();
+                    }
+                }
+                Button {
+                    text: "삭제";
+                    clicked => {
+                        root.delete-selected();
+                    }
+                }
+                Rectangle {
+                    horizontal-stretch: 1;
+                }
+                CheckBox {
+                    text: "숨긴 항목";
+                    checked <=> root.show-hidden;
+                    changed checked => {
+                        root.view-changed();
+                    }
+                }
+                CheckBox {
+                    text: "파일 확장명";
+                    checked <=> root.show-ext;
+                    changed checked => {
+                        root.view-changed();
                     }
                 }
             }
@@ -328,15 +402,23 @@ export component AppWindow inherits Window {
                         HorizontalLayout {
                             padding-left: 6px;
                             alignment: start;
+                            Image {
+                                width: 16px;
+                                source: r.icon;
+                                image-fit: contain;
+                            }
+                            Rectangle {
+                                width: 6px;
+                            }
                             if !r.editing: Text {
-                                width: root.w-name;
+                                width: root.w-name - 22px;
                                 text: r.name;
                                 overflow: elide;
                                 vertical-alignment: center;
                                 color: Palette.foreground;
                             }
                             if r.editing: LineEdit {
-                                width: root.w-name;
+                                width: root.w-name - 22px;
                                 text: r.name;
                                 init => {
                                     self.focus();

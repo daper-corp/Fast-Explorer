@@ -6,7 +6,8 @@ use std::io;
 use std::os::windows::ffi::OsStrExt;
 use std::path::{Path, PathBuf};
 
-use windows::Win32::Foundation::{ERROR_ACCESS_DENIED, HANDLE, HGLOBAL, HWND, POINT};
+use windows::Win32::Foundation::{ERROR_ACCESS_DENIED, ERROR_SUCCESS, HANDLE, HGLOBAL, HWND, POINT};
+use windows::Win32::System::Registry::{HKEY_CURRENT_USER, RRF_RT_REG_DWORD, RegGetValueW};
 use windows::Win32::Storage::FileSystem::{MOVE_FILE_FLAGS, MoveFileExW};
 use windows::Win32::System::Com::{
     CLSCTX_ALL, COINIT_APARTMENTTHREADED, COINIT_DISABLE_OLE1DDE, CoCreateInstance, CoInitializeEx, CoTaskMemFree,
@@ -160,15 +161,51 @@ pub fn open(path: &Path) -> io::Result<()> {
 
 /// Creates "새 폴더", "새 폴더 (2)", ... in `dir`; returns the name used.
 pub fn new_folder(dir: &Path) -> io::Result<String> {
+    new_item(dir, "새 폴더", "", true)
+}
+
+/// Creates an empty "새 텍스트 문서.txt" (or "(2)", ...) in `dir`; returns the name used.
+pub fn new_text_file(dir: &Path) -> io::Result<String> {
+    new_item(dir, "새 텍스트 문서", ".txt", false)
+}
+
+/// Never touches an existing item: the first free name wins.
+fn new_item(dir: &Path, base: &str, ext: &str, folder: bool) -> io::Result<String> {
     for n in 1..1000 {
-        let name = if n == 1 { "새 폴더".to_string() } else { format!("새 폴더 ({n})") };
-        match std::fs::create_dir(dir.join(&name)) {
+        let name = if n == 1 { format!("{base}{ext}") } else { format!("{base} ({n}){ext}") };
+        let path = dir.join(&name);
+        let r = match folder {
+            true => std::fs::create_dir(&path),
+            false => std::fs::OpenOptions::new().write(true).create_new(true).open(&path).map(drop),
+        };
+        match r {
             Ok(()) => return Ok(name),
             Err(e) if e.kind() == io::ErrorKind::AlreadyExists => continue,
             Err(e) => return Err(e),
         }
     }
-    Err(io::Error::new(io::ErrorKind::AlreadyExists, "새 폴더 이름을 만들 수 없음"))
+    Err(io::Error::new(io::ErrorKind::AlreadyExists, format!("{base} 이름을 만들 수 없음")))
+}
+
+/// Explorer's own view settings: (show hidden items, show file name extensions).
+pub fn explorer_view() -> (bool, bool) {
+    let read = |name: PCWSTR| {
+        let (mut value, mut size) = (0u32, 4u32);
+        let r = unsafe {
+            RegGetValueW(
+                HKEY_CURRENT_USER,
+                w!(r"Software\Microsoft\Windows\CurrentVersion\Explorer\Advanced"),
+                name,
+                RRF_RT_REG_DWORD,
+                None,
+                Some((&raw mut value).cast()),
+                Some(&mut size),
+            )
+        };
+        (r == ERROR_SUCCESS).then_some(value)
+    };
+    // Hidden: 1 = show, 2 = don't. HideFileExt: 0 = show. Missing values mean Windows' defaults.
+    (read(w!("Hidden")) == Some(1), read(w!("HideFileExt")) == Some(0))
 }
 
 /// Puts `paths` on the clipboard as CF_HDROP + "Preferred DropEffect", the format
@@ -321,6 +358,8 @@ mod tests {
 
         assert_eq!(new_folder(&a).unwrap(), "새 폴더");
         assert_eq!(new_folder(&a).unwrap(), "새 폴더 (2)");
+        assert_eq!(new_text_file(&a).unwrap(), "새 텍스트 문서.txt");
+        assert_eq!(new_text_file(&a).unwrap(), "새 텍스트 문서 (2).txt");
 
         assert!(run(&Op::Delete { paths: vec![b.clone()], permanent: true }, None).unwrap());
         assert!(!b.exists());
