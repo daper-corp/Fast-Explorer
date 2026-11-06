@@ -27,8 +27,7 @@ use windows::Win32::Security::Authorization::{
 use windows::Win32::Security::{RevertToSelf, GetTokenInformation, PSECURITY_DESCRIPTOR, SECURITY_ATTRIBUTES, TOKEN_QUERY, TOKEN_USER, TokenUser};
 use windows::Win32::Storage::FileSystem::{
     CreateFileW, FILE_FLAG_BACKUP_SEMANTICS, FILE_FLAG_FIRST_PIPE_INSTANCE, FILE_LIST_DIRECTORY, FILE_SHARE_DELETE,
-    FILE_SHARE_READ, FILE_SHARE_WRITE, FlushFileBuffers, OPEN_EXISTING, GetDriveTypeW, GetLogicalDrives, GetVolumeInformationW,
-    PIPE_ACCESS_DUPLEX,
+    FILE_SHARE_READ, FILE_SHARE_WRITE, FlushFileBuffers, OPEN_EXISTING, PIPE_ACCESS_DUPLEX,
 };
 use windows::Win32::System::Pipes::{
     ConnectNamedPipe, CreateNamedPipeW, ImpersonateNamedPipeClient, PIPE_READMODE_BYTE, PIPE_REJECT_REMOTE_CLIENTS, PIPE_TYPE_BYTE,
@@ -56,7 +55,7 @@ fn main() -> Res<()> {
         Some("uninstall") => uninstall(),
         Some("run") => {
             let sid = current_user_sid()?;
-            println!("indexing {:?}; serving {PIPE_NAME} for {sid}", fixed_ntfs_volumes());
+            println!("indexing {:?}; serving {PIPE_NAME} for {sid}", index::fixed_ntfs_volumes());
             start(sid)?;
             thread::park();
             Ok(())
@@ -125,7 +124,7 @@ struct Slot {
 
 fn start(user_sid: String) -> Res<()> {
     let slots: Arc<Vec<Slot>> = Arc::new(
-        fixed_ntfs_volumes()
+        index::fixed_ntfs_volumes()
             .into_iter()
             .map(|l| Slot { index: RwLock::new(Volume::new(l)), ready: AtomicBool::new(false) })
             .collect(),
@@ -169,23 +168,6 @@ fn keep_indexed(slot: &Slot) {
             }
         }
     }
-}
-
-fn fixed_ntfs_volumes() -> Vec<char> {
-    const DRIVE_FIXED: u32 = 3;
-    let mask = unsafe { GetLogicalDrives() };
-    ('A'..='Z')
-        .filter(|&c| mask & (1 << (c as u32 - 'A' as u32)) != 0)
-        .filter(|&c| {
-            let root = HSTRING::from(format!("{c}:\\"));
-            let mut fs = [0u16; 16];
-            unsafe {
-                GetDriveTypeW(&root) == DRIVE_FIXED
-                    && GetVolumeInformationW(&root, None, None, None, None, Some(&mut fs)).is_ok()
-                    && String::from_utf16_lossy(&fs).trim_end_matches('\0') == "NTFS"
-            }
-        })
-        .collect()
 }
 
 // ---------- the pipe ----------
@@ -243,33 +225,48 @@ fn serve(slots: Arc<Vec<Slot>>, security: PipeSecurity) {
     }
 }
 
-/// One request per connection: `S <limit> <query>`.
+/// One request per connection: `S <limit> <scope-kind> <scope-path> <query>`.
 fn answer(pipe: File, slots: &[Slot]) {
     let mut line = String::new();
     if BufReader::new(&pipe).take(4096).read_line(&mut line).is_err() {
         return;
     }
-    let mut f = line.trim_end_matches(['\r', '\n']).splitn(3, '\t');
+    let mut f = line.trim_end_matches(['\r', '\n']).splitn(5, '\t');
+    let scope = match (f.next(), f.next().and_then(|n| n.parse::<usize>().ok()), f.next(), f.next(), f.next()) {
+        (Some("S"), Some(limit), Some(kind), Some(path), Some(query)) => {
+            index::decode_scope(kind, path).map(|scope| (limit, scope, query.to_string()))
+        }
+        _ => None,
+    };
     let mut out = BufWriter::new(&pipe);
-    let _ = match (f.next(), f.next().and_then(|n| n.parse::<usize>().ok()), f.next()) {
-        (Some("S"), Some(limit), Some(query)) => {
+    let _ = match scope {
+        Some((limit, scope, query)) => {
             let want = limit.clamp(1, MAX_LIMIT);
             // Fetch extra: some hits may be hidden from this client below.
             let fetch = want * 4;
             let guards: Vec<_> = slots.iter().map(|s| s.index.read().unwrap()).collect();
-            let (matched, hits) = index::search(guards.iter().map(|g| &**g), query, fetch);
+            let found = index::search(guards.iter().map(|g| &**g), &scope, &query, fetch);
             drop(guards);
-            let checked_all = matched <= fetch;
-            let visible = visible_to_client(HANDLE(pipe.as_raw_handle()), hits, if checked_all { usize::MAX } else { want + 1 });
-            // Only ever report what this client may see: the unfiltered `matched` count would tell
-            // it whether hidden files with a given name exist. `more` likewise comes from visible
-            // hits alone (so it can miss visible matches beyond the fetched ones, never leak).
-            let more = visible.len() > want;
-            let hits = &visible[..visible.len().min(want)];
-            let indexing = slots.iter().filter(|s| !s.ready.load(Ordering::Relaxed)).count();
-            index::encode_results(&mut out, hits, indexing, more)
+            match found {
+                Ok((matched, hits)) => {
+                    let checked_all = matched <= fetch;
+                    let visible = visible_to_client(
+                        HANDLE(pipe.as_raw_handle()),
+                        hits,
+                        if checked_all { usize::MAX } else { want + 1 },
+                    );
+                    // Only ever report what this client may see: the unfiltered `matched` count would tell
+                    // it whether hidden files with a given name exist. `more` likewise comes from visible
+                    // hits alone (so it can miss visible matches beyond the fetched ones, never leak).
+                    let more = visible.len() > want;
+                    let hits = &visible[..visible.len().min(want)];
+                    let indexing = slots.iter().filter(|s| !s.ready.load(Ordering::Relaxed)).count();
+                    index::encode_results(&mut out, hits, indexing, more)
+                }
+                Err(e) => writeln!(out, "ERR\t{e}"),
+            }
         }
-        _ => writeln!(out, "ERR\t알 수 없는 요청"),
+        None => writeln!(out, "ERR\t알 수 없는 요청"),
     };
     let _ = out.flush();
     unsafe {

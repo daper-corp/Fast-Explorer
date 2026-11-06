@@ -1,4 +1,4 @@
-import { LineEdit, CheckBox, ListView, ScrollView, Palette } from "std-widgets.slint";
+import { LineEdit, CheckBox, ComboBox, ListView, ScrollView, Palette } from "std-widgets.slint";
 
 export struct Row {
     name: string,
@@ -12,10 +12,23 @@ export struct Row {
     // Folder of a search hit; empty when browsing a folder.
     location: string,
     icon: image,
+    // 0..1 used share for drive rows in "내 PC"; negative hides the bar.
+    usage: float,
+    // Search tree: nesting depth, and whether this folder can expand / is expanded.
+    depth: int,
+    expandable: bool,
+    expanded: bool,
 }
 
 export struct TabInfo {
     title: string,
+}
+
+// One address-bar path suggestion.
+export struct Suggest {
+    name: string,
+    detail: string,
+    path: string,
 }
 
 export struct Place {
@@ -293,6 +306,8 @@ component PlaceRow inherits Rectangle {
 component Sidebar inherits Rectangle {
     in property <[Place]> favorites;
     in property <[Place]> drives;
+    in property <string> this-pc-path;
+    in property <bool> this-pc-active;
     callback open(string);
     callback add;
     callback remove(string);
@@ -371,15 +386,28 @@ component Sidebar inherits Rectangle {
                     height: 12px;
                 }
 
-                HorizontalLayout {
-                    height: 22px;
-                    padding-left: 6px;
-                    padding-bottom: 2px;
+                Rectangle {
+                    height: 24px;
+                    border-radius: 4px;
+                    background: root.this-pc-active
+                        ? Palette.accent-background.transparentize(0.82)
+                        : pc-touch.has-hover ? Palette.foreground.transparentize(0.94) : transparent;
                     Text {
+                        x: 8px;
+                        y: 0;
+                        height: parent.height;
                         text: "내 PC";
                         font-size: 12px;
-                        color: root.dim;
+                        color: root.this-pc-active ? Palette.foreground : root.dim;
                         vertical-alignment: center;
+                    }
+                    pc-touch := TouchArea {
+                        width: 100%;
+                        height: 100%;
+                        mouse-cursor: pointer;
+                        clicked => {
+                            root.open(root.this-pc-path);
+                        }
                     }
                 }
 
@@ -412,12 +440,20 @@ export component AppWindow inherits Window {
     in property <[Row]> rows;
     in property <string> path;
     in property <[Crumb]> crumbs;
+    // The "내 PC" view: drives and user folders instead of a folder listing.
+    in property <bool> this-pc;
+    in property <string> this-pc-path;
+    // Address-bar autocomplete.
+    in-out property <[Suggest]> suggestions;
+    in-out property <int> suggest-index: -1;
     // The address bar shows folder buttons until clicked; then it is a text field.
     private property <bool> address-editing: false;
     private property <string> address-text;
     in property <string> status;
     in property <bool> search-mode;
     in-out property <string> search-text;
+    // 0 = 현재 폴더, 1 = 하위 폴더, 2 = 전체 검색.
+    in-out property <int> search-scope: 2;
     in-out property <bool> show-hidden;
     in-out property <bool> show-ext;
     in property <bool> can-back;
@@ -442,9 +478,16 @@ export component AppWindow inherits Window {
     // Where the list sits in the window, to place keyboard-opened menus.
     out property <length> list-origin-x: list.absolute-position.x;
     out property <length> list-origin-y: list.absolute-position.y;
+    // The address bar's place in the window, for the autocomplete popup.
+    out property <length> address-x: address-box.absolute-position.x;
+    out property <length> address-y: address-box.absolute-position.y;
+    out property <length> address-width: address-box.width;
+    out property <length> address-height: address-box.height;
 
     callback navigate(string);
     callback search(string);
+    callback search-scope-changed();
+    callback row-expand(int);
     callback back();
     callback forward();
     callback up();
@@ -478,14 +521,33 @@ export component AppWindow inherits Window {
     callback window-close();
     // `in-list` is true when the file list has focus; otherwise only global shortcuts apply.
     callback key(KeyEvent, bool) -> bool;
+    callback suggest(string);
+    callback suggest-cancel();
+
+    public function close-suggestions() {
+        root.suggestions = [];
+        root.suggest-index = -1;
+        root.suggest-cancel();
+    }
+
+    public function pick-suggestion(i: int) {
+        if (i >= 0 && i < root.suggestions.length) {
+            root.address-text = root.suggestions[i].path;
+            root.address-editing = false;
+            root.close-suggestions();
+            root.navigate(root.address-text);
+        }
+    }
 
     public function focus-list() {
         root.address-editing = false;
         root.address-text = root.path;
+        root.close-suggestions();
         list-focus.focus();
     }
 
     public function focus-address() {
+        root.close-suggestions();
         root.address-editing = true;
         root.address-text = root.path;
         address.focus();
@@ -495,6 +557,7 @@ export component AppWindow inherits Window {
     public function focus-search() {
         root.address-editing = false;
         root.address-text = root.path;
+        root.close-suggestions();
         search-box.focus();
         search-box.select-all();
     }
@@ -504,6 +567,7 @@ export component AppWindow inherits Window {
     private property <length> w-date: 150px;
     private property <length> w-kind: 130px;
     private property <length> w-size: 100px;
+    private property <length> suggestion-row-height: 28px;
     // Explorer leaves a small strip on each side of the rows where a drag starts a
     // rubber-band selection instead of hitting a row.
     private property <length> list-margin: 6px;
@@ -686,7 +750,7 @@ export component AppWindow inherits Window {
                         root.up();
                     }
                 }
-                Rectangle {
+                address-box := Rectangle {
                     horizontal-stretch: 1;
                     height: 30px;
                     border-radius: 6px;
@@ -700,11 +764,33 @@ export component AppWindow inherits Window {
                         width: parent.width - 2px;
                         height: parent.height - 2px;
                         text <=> root.address-text;
+                        edited(t) => {
+                            root.suggest(t);
+                        }
                         accepted(t) => {
-                            root.address-editing = false;
-                            root.navigate(t);
+                            if (root.suggest-index >= 0) {
+                                root.pick-suggestion(root.suggest-index);
+                            } else {
+                                root.address-editing = false;
+                                root.close-suggestions();
+                                root.navigate(t);
+                            }
                         }
                         key-pressed(e) => {
+                            if (root.suggestions.length > 0) {
+                                if (e.text == Key.DownArrow) {
+                                    root.suggest-index = root.suggest-index + 1 < root.suggestions.length ? root.suggest-index + 1 : 0;
+                                    return accept;
+                                }
+                                if (e.text == Key.UpArrow) {
+                                    root.suggest-index = root.suggest-index <= 0 ? root.suggestions.length - 1 : root.suggest-index - 1;
+                                    return accept;
+                                }
+                                if (e.text == Key.Escape) {
+                                    root.close-suggestions();
+                                    return accept;
+                                }
+                            }
                             if e.text == Key.Escape {
                                 root.address-editing = false;
                                 root.address-text = root.path;
@@ -717,6 +803,7 @@ export component AppWindow inherits Window {
                             if !self.has-focus && root.address-editing {
                                 root.address-editing = false;
                                 root.address-text = root.path;
+                                root.close-suggestions();
                             }
                         }
                     }
@@ -766,9 +853,18 @@ export component AppWindow inherits Window {
                         }
                     }
                 }
+                ComboBox {
+                    width: 160px;
+                    horizontal-stretch: 0;
+                    model: ["현재 폴더", "하위 폴더", "전체 검색"];
+                    current-index <=> root.search-scope;
+                    selected(v) => {
+                        root.search-scope-changed();
+                    }
+                }
                 search-box := LineEdit {
                     width: 280px;
-                    placeholder-text: "검색 (Ctrl+F) · 내용:단어 = 파일 내용";
+                    placeholder-text: "검색 (Ctrl+F) · * ? /정규식/ · 내용:단어";
                     text <=> root.search-text;
                     edited(t) => {
                         root.search(t);
@@ -785,6 +881,8 @@ export component AppWindow inherits Window {
                     vertical-stretch: 1;
                     favorites: root.favorites;
                     drives: root.drives;
+                    this-pc-path: root.this-pc-path;
+                    this-pc-active: root.this-pc;
                     open(p) => {
                         root.place-open(p);
                     }
@@ -814,18 +912,21 @@ export component AppWindow inherits Window {
                         cross-axis-alignment: center;
                         ToolButton {
                             text: "새 폴더";
+                            enabled: !root.this-pc || root.search-mode;
                             clicked => {
                                 root.new-folder();
                             }
                         }
                         ToolButton {
                             text: "새 텍스트 문서";
+                            enabled: !root.this-pc || root.search-mode;
                             clicked => {
                                 root.new-file();
                             }
                         }
                         ToolButton {
                             text: "삭제";
+                            enabled: !root.this-pc || root.search-mode;
                             clicked => {
                                 root.delete-selected();
                             }
@@ -841,6 +942,7 @@ export component AppWindow inherits Window {
                         }
                         CheckBox {
                             text: "숨긴 항목";
+                            visible: !root.this-pc || root.search-mode;
                             checked <=> root.show-hidden;
                             changed checked => {
                                 root.view-changed();
@@ -848,6 +950,7 @@ export component AppWindow inherits Window {
                         }
                         CheckBox {
                             text: "파일 확장명";
+                            visible: !root.this-pc || root.search-mode;
                             checked <=> root.show-ext;
                             changed checked => {
                                 root.view-changed();
@@ -898,7 +1001,7 @@ export component AppWindow inherits Window {
                                 min-column-width: 100px;
                                 max-column-width: max(100px, header-bar.width - root.list-margin - 7px - root.w-name - (root.search-mode ? root.w-location : 0px));
                                 fit-width: max(100px, measure-date.preferred-width + 22px);
-                                text: "수정한 날짜";
+                                text: root.this-pc && !root.search-mode ? "여유 공간" : "수정한 날짜";
                                 sorted: root.sort-column == 1;
                                 descending: root.sort-desc;
                                 clicked => {
@@ -934,7 +1037,7 @@ export component AppWindow inherits Window {
                                 min-column-width: 70px;
                                 max-column-width: max(70px, header-bar.width - root.list-margin - 7px - root.w-name - (root.search-mode ? root.w-location : 0px) - root.w-date - root.w-kind);
                                 fit-width: max(70px, measure-size.preferred-width + 22px);
-                                text: "크기";
+                                text: root.this-pc && !root.search-mode ? "전체 용량" : "크기";
                                 sorted: root.sort-column == 3;
                                 descending: root.sort-desc;
                                 clicked => {
@@ -1047,6 +1150,27 @@ export component AppWindow inherits Window {
                                 HorizontalLayout {
                                     padding-left: 6px;
                                     alignment: start;
+                                    private property <length> tree-indent: root.search-mode ? (14px + r.depth * 14px) : 0px;
+                                    if root.search-mode: Rectangle {
+                                        width: r.depth * 14px;
+                                    }
+                                    if root.search-mode: Rectangle {
+                                        width: 14px;
+                                        height: 100%;
+                                        Text {
+                                            text: !r.expandable ? "" : r.expanded ? "▾" : "▸";
+                                            font-size: 9px;
+                                            horizontal-alignment: center;
+                                            vertical-alignment: center;
+                                            color: root.dim;
+                                        }
+                                        if r.expandable: TouchArea {
+                                            clicked => {
+                                                list-focus.focus();
+                                                root.row-expand(i);
+                                            }
+                                        }
+                                    }
                                     Image {
                                         width: 16px;
                                         source: r.icon;
@@ -1056,14 +1180,14 @@ export component AppWindow inherits Window {
                                         width: 6px;
                                     }
                                     if !r.editing: Text {
-                                        width: root.w-name - 22px;
+                                        width: max(0px, root.w-name - 22px - tree-indent);
                                         text: r.name;
                                         overflow: elide;
                                         vertical-alignment: center;
                                         color: Palette.foreground;
                                     }
                                     if r.editing: LineEdit {
-                                        width: root.w-name - 22px;
+                                        width: max(0px, root.w-name - 22px - tree-indent);
                                         text: r.name;
                                         init => {
                                             self.focus();
@@ -1092,21 +1216,46 @@ export component AppWindow inherits Window {
                                         vertical-alignment: center;
                                         color: root.dim;
                                     }
-                                    Text {
+                                    Rectangle {
                                         width: root.w-date;
-                                        text: r.date;
-                                        vertical-alignment: center;
-                                        color: root.dim;
+                                        height: parent.height;
+
+                                        Text {
+                                            x: 0;
+                                            y: 0;
+                                            width: parent.width;
+                                            height: parent.height - 4px;
+                                            text: r.date;
+                                            overflow: elide;
+                                            vertical-alignment: center;
+                                            color: root.dim;
+                                        }
+                                        if r.usage >= 0.0: Rectangle {
+                                            y: parent.height - 4px;
+                                            height: 3px;
+                                            width: parent.width;
+                                            background: Palette.foreground.transparentize(0.88);
+                                            border-radius: 1.5px;
+                                        }
+                                        if r.usage >= 0.0: Rectangle {
+                                            y: parent.height - 4px;
+                                            height: 3px;
+                                            width: parent.width * r.usage;
+                                            background: Palette.accent-background;
+                                            border-radius: 1.5px;
+                                        }
                                     }
                                     Text {
                                         width: root.w-kind;
                                         text: r.kind;
+                                        overflow: elide;
                                         vertical-alignment: center;
                                         color: root.dim;
                                     }
                                     Text {
                                         width: root.w-size;
                                         text: r.size;
+                                        overflow: elide;
                                         horizontal-alignment: right;
                                         vertical-alignment: center;
                                         color: root.dim;
@@ -1138,6 +1287,63 @@ export component AppWindow inherits Window {
                 Text {
                     text: root.status;
                     color: root.dim;
+                }
+            }
+        }
+
+        // Address-bar autocomplete; a later sibling draws above the page.
+        if (root.address-editing && root.suggestions.length > 0): Rectangle {
+            x: root.address-x;
+            y: min(
+                root.address-y + root.address-height + 2px,
+                root.height - root.suggestions.length * root.suggestion-row-height - 16px,
+            );
+            width: root.address-width;
+            height: root.suggestions.length * root.suggestion-row-height + 8px;
+            background: Palette.background;
+            border-radius: 6px;
+            border-width: 1px;
+            border-color: Palette.foreground.transparentize(0.75);
+            clip: true;
+
+            VerticalLayout {
+                padding: 4px;
+                spacing: 0px;
+                for s[i] in root.suggestions: Rectangle {
+                    height: root.suggestion-row-height;
+                    border-radius: 4px;
+                    background: i == root.suggest-index
+                        ? Palette.accent-background.transparentize(0.65)
+                        : suggest-touch.has-hover ? Palette.foreground.transparentize(0.94) : transparent;
+
+                    HorizontalLayout {
+                        padding-left: 8px;
+                        padding-right: 8px;
+                        spacing: 8px;
+                        Text {
+                            width: 240px;
+                            text: s.name;
+                            overflow: elide;
+                            vertical-alignment: center;
+                            color: Palette.foreground;
+                        }
+                        Text {
+                            horizontal-stretch: 1;
+                            text: s.detail;
+                            overflow: elide;
+                            vertical-alignment: center;
+                            color: root.dim;
+                        }
+                    }
+
+                    suggest-touch := TouchArea {
+                        width: 100%;
+                        height: 100%;
+                        mouse-cursor: pointer;
+                        clicked => {
+                            root.pick-suggestion(i);
+                        }
+                    }
                 }
             }
         }

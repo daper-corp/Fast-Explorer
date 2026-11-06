@@ -28,12 +28,13 @@ impl Hasher for FrnHasher {
 use std::io::{self, BufRead, BufReader, Write};
 use std::os::windows::fs::OpenOptionsExt;
 use std::os::windows::io::AsRawHandle;
-use std::path::PathBuf;
+use std::path::{Path, PathBuf};
 use std::time::Duration;
 
 use windows::Win32::Foundation::HANDLE;
 use windows::Win32::Storage::FileSystem::{
-    CreateFileW, FILE_FLAGS_AND_ATTRIBUTES, FILE_SHARE_READ, FILE_SHARE_WRITE, OPEN_EXISTING,
+    CreateFileW, FILE_FLAGS_AND_ATTRIBUTES, FILE_SHARE_READ, FILE_SHARE_WRITE, GetDriveTypeW,
+    GetLogicalDrives, GetVolumeInformationW, OPEN_EXISTING,
 };
 use windows::Win32::System::IO::DeviceIoControl;
 use windows::Win32::System::Ioctl::{
@@ -49,6 +50,7 @@ use windows::Win32::System::Services::{
 use windows::core::{HSTRING, Owned};
 
 use crate::menu::{dec_path, enc_path};
+use crate::search::{Pattern, Scope};
 
 pub const PIPE_NAME: &str = r"\\.\pipe\fast-explorer-index";
 pub const SERVICE_NAME: &str = "FastExplorerIndex";
@@ -184,8 +186,9 @@ impl Volume {
         None // a cycle; shouldn't happen
     }
 
-    /// Records whose name contains every term, scanned on all cores.
-    fn matches(&self, terms: &[Term]) -> Vec<u32> {
+    /// Records whose name matches the pattern and whose path is in the scope, scanned on all
+    /// cores. Paths are only built for records that already match the name (scoped searches).
+    fn matches(&self, pattern: &Pattern, scope: &Scope) -> Vec<u32> {
         let threads = std::thread::available_parallelism().map_or(4, |n| n.get());
         let chunk = self.recs.len().div_ceil(threads).max(1 << 14);
         std::thread::scope(|s| {
@@ -198,7 +201,14 @@ impl Volume {
                         let base = (c * chunk) as u32;
                         recs.iter()
                             .enumerate()
-                            .filter(|(_, r)| r.frn != DEAD && terms.iter().all(|t| t.matches(self.name(r))))
+                            .filter(|(i, r)| {
+                                r.frn != DEAD
+                                    && pattern.matches(self.name(r))
+                                    && (matches!(scope, Scope::All)
+                                        || self
+                                            .path(base + *i as u32)
+                                            .is_some_and(|p| scope.includes(std::path::Path::new(&p))))
+                            })
                             .map(|(i, _)| base + i as u32)
                             .collect::<Vec<_>>()
                     })
@@ -209,65 +219,27 @@ impl Volume {
     }
 }
 
-/// A query word, matched case-insensitively anywhere in the name.
-struct Term {
-    lower: String,
-    kind: TermKind,
-}
-
-enum TermKind {
-    /// ASCII bytes never occur inside UTF-8 multi-byte sequences, so a byte-wise
-    /// ASCII-case-insensitive search is exact.
-    Ascii,
-    /// No letter in it has case (Hangul, digits, ...): a plain substring search is exact.
-    Caseless,
-    Other,
-}
-
-impl Term {
-    fn new(t: &str) -> Self {
-        let lower = t.to_lowercase();
-        let kind = if t.is_ascii() {
-            TermKind::Ascii
-        } else if t.chars().all(|c| c.is_lowercase() == c.is_uppercase()) {
-            TermKind::Caseless
-        } else {
-            TermKind::Other
-        };
-        Term { lower, kind }
-    }
-
-    fn matches(&self, name: &str) -> bool {
-        match self.kind {
-            TermKind::Ascii => {
-                let (h, n) = (name.as_bytes(), self.lower.as_bytes());
-                n.len() <= h.len() && h.windows(n.len()).any(|w| w.eq_ignore_ascii_case(n))
-            }
-            TermKind::Caseless => name.contains(&self.lower),
-            TermKind::Other => name.to_lowercase().contains(&self.lower),
-        }
-    }
-}
-
 #[derive(Clone, Debug, PartialEq)]
 pub struct Hit {
     pub path: PathBuf,
     pub dir: bool,
 }
 
-/// Searches every volume: names containing all whitespace-separated words of `query`.
+/// Searches every volume: names matching the query and paths inside `scope`.
 /// Returns the total match count and up to `limit` hits.
-pub fn search<'a>(volumes: impl IntoIterator<Item = &'a Volume>, query: &str, limit: usize) -> (usize, Vec<Hit>) {
-    let terms: Vec<Term> = query
-        .split_whitespace()
-        .map(Term::new)
-        .collect();
-    if terms.is_empty() {
-        return (0, Vec::new());
-    }
+pub fn search<'a>(
+    volumes: impl IntoIterator<Item = &'a Volume>,
+    scope: &Scope,
+    query: &str,
+    limit: usize,
+) -> Result<(usize, Vec<Hit>), String> {
+    let pattern = Pattern::compile(query)?;
     let (mut total, mut hits) = (0, Vec::new());
     for v in volumes {
-        let found = v.matches(&terms);
+        if !scope.covers_volume(v.letter()) {
+            continue;
+        }
+        let found = v.matches(&pattern, scope);
         total += found.len();
         for i in found {
             if hits.len() == limit {
@@ -278,7 +250,7 @@ pub fn search<'a>(volumes: impl IntoIterator<Item = &'a Volume>, query: &str, li
             }
         }
     }
-    (total, hits)
+    Ok((total, hits))
 }
 
 // ---------- reading a volume (admin) ----------
@@ -336,6 +308,33 @@ impl Volume {
 pub struct JournalPos {
     pub journal_id: u64,
     pub next_usn: i64,
+}
+
+/// The fixed NTFS volumes the index service builds an index for.
+pub fn fixed_ntfs_volumes() -> Vec<char> {
+    const DRIVE_FIXED: u32 = 3;
+    let mask = unsafe { GetLogicalDrives() };
+    ('A'..='Z')
+        .filter(|&c| mask & (1 << (c as u32 - 'A' as u32)) != 0)
+        .filter(|&c| {
+            let root = HSTRING::from(format!("{c}:\\"));
+            let mut fs = [0u16; 16];
+            unsafe {
+                GetDriveTypeW(&root) == DRIVE_FIXED
+                    && GetVolumeInformationW(&root, None, None, None, None, Some(&mut fs)).is_ok()
+                    && String::from_utf16_lossy(&fs).trim_end_matches('\0') == "NTFS"
+            }
+        })
+        .collect()
+}
+
+/// Whether `path` lives on a volume the index service can answer for.
+pub fn is_indexable(path: &Path) -> bool {
+    let s = path.to_string_lossy();
+    let b = s.as_bytes();
+    let letter = (b.len() >= 2 && b[0].is_ascii_alphabetic() && b[1] == b':')
+        .then(|| b[0].to_ascii_uppercase() as char);
+    letter.is_some_and(|l| fixed_ntfs_volumes().contains(&l))
 }
 
 pub fn open_volume(letter: char) -> io::Result<Owned<HANDLE>> {
@@ -412,10 +411,29 @@ pub fn read_changes(vol: HANDLE, pos: &mut JournalPos, buf: &mut [u8], apply: im
 
 // ---------- the pipe protocol ----------
 //
-// Request:  S <limit> <query>\n
+// Request:  S <limit> <scope-kind> <scope-path> <query>\n
+//   scope-kind: a (all drives) | u (under path) | d (direct children of path)
 // Reply:    OK <count> <indexing-volumes> <more 0|1>\n  then `count` lines:  d|f <path>\n
 //           ERR <message>\n
 // No overall match count is sent: it would include files hidden from the client.
+
+/// The scope as two wire fields: a kind letter and an encoded path (empty for `All`).
+pub fn encode_scope(scope: &Scope) -> (&'static str, String) {
+    match scope {
+        Scope::All => ("a", String::new()),
+        Scope::Under(p) => ("u", enc_path(p)),
+        Scope::Direct(p) => ("d", enc_path(p)),
+    }
+}
+
+pub fn decode_scope(kind: &str, path: &str) -> Option<Scope> {
+    match kind {
+        "a" => Some(Scope::All),
+        "u" => Some(Scope::Under(dec_path(path))),
+        "d" => Some(Scope::Direct(dec_path(path))),
+        _ => None,
+    }
+}
 
 pub struct Results {
     pub hits: Vec<Hit>,
@@ -425,8 +443,11 @@ pub struct Results {
     pub indexing: usize,
 }
 
+/// Version 2 carries the search scope. A bare `OK` reply comes from an older service.
+pub const REPLY_OK: &str = "OK2";
+
 pub fn encode_results(out: &mut impl Write, hits: &[Hit], indexing: usize, more: bool) -> io::Result<()> {
-    writeln!(out, "OK\t{}\t{indexing}\t{}", hits.len(), more as u8)?;
+    writeln!(out, "{REPLY_OK}\t{}\t{indexing}\t{}", hits.len(), more as u8)?;
     for h in hits {
         writeln!(out, "{}\t{}", if h.dir { 'd' } else { 'f' }, enc_path(&h.path))?;
     }
@@ -439,8 +460,11 @@ pub fn decode_results(input: impl BufRead) -> io::Result<Results> {
     let head = lines.next().ok_or_else(bad)??;
     let mut f = head.split('\t');
     match f.next() {
-        Some("OK") => {}
-        Some("ERR") => return Err(io::Error::other(f.next().unwrap_or("").to_string())),
+        Some(REPLY_OK) => {}
+        Some("OK") => {
+            return Err(io::Error::new(io::ErrorKind::InvalidInput, "인덱스 서비스가 오래됨 · 다시 설치하세요"));
+        }
+        Some("ERR") => return Err(io::Error::new(io::ErrorKind::InvalidInput, f.next().unwrap_or("").to_string())),
         _ => return Err(bad()),
     }
     let mut num = || f.next().and_then(|s| s.parse::<usize>().ok()).ok_or_else(bad);
@@ -460,11 +484,13 @@ pub enum QueryError {
     NotInstalled,
     /// Installed but not reachable (stopped, starting, or something else owns the pipe).
     Unavailable(String),
+    /// The service understood the request but refused it (e.g. a bad regular expression).
+    Rejected(String),
 }
 
 /// Asks the index service. Refuses to talk to a pipe not served by the service itself,
 /// so another process can't pose as the index.
-pub fn query(text: &str, limit: usize) -> Result<Results, QueryError> {
+pub fn query(scope: &Scope, text: &str, limit: usize) -> Result<Results, QueryError> {
     let service_pid = service_pid()?;
     let pipe = open_pipe().map_err(|e| QueryError::Unavailable(e.to_string()))?;
     let mut server_pid = 0;
@@ -474,10 +500,14 @@ pub fn query(text: &str, limit: usize) -> Result<Results, QueryError> {
         return Err(QueryError::Unavailable("검색 파이프의 주인이 인덱스 서비스가 아님".into()));
     }
     let query = text.replace(['\t', '\r', '\n'], " ");
+    let (kind, path) = encode_scope(scope);
     (&pipe)
-        .write_all(format!("S\t{limit}\t{query}\n").as_bytes())
-        .and_then(|_| decode_results(BufReader::new(&pipe)))
-        .map_err(|e| QueryError::Unavailable(e.to_string()))
+        .write_all(format!("S\t{limit}\t{kind}\t{path}\t{query}\n").as_bytes())
+        .map_err(|e| QueryError::Unavailable(e.to_string()))?;
+    decode_results(BufReader::new(&pipe)).map_err(|e| match e.kind() {
+        io::ErrorKind::InvalidInput => QueryError::Rejected(e.to_string()),
+        _ => QueryError::Unavailable(e.to_string()),
+    })
 }
 
 fn open_pipe() -> io::Result<std::fs::File> {
@@ -537,7 +567,12 @@ mod tests {
     }
 
     fn names(v: &Volume, q: &str) -> Vec<String> {
-        let mut p: Vec<String> = search([v], q, 100).1.into_iter().map(|h| h.path.display().to_string()).collect();
+        let mut p: Vec<String> = search([v], &Scope::All, q, 100)
+            .unwrap()
+            .1
+            .into_iter()
+            .map(|h| h.path.display().to_string())
+            .collect();
         p.sort();
         p
     }
@@ -550,8 +585,39 @@ mod tests {
         assert_eq!(names(&v, "보고"), [r"C:\Users\hp\보고서.hwp"]);
         assert_eq!(names(&v, "users"), [r"C:\Users"]);
         assert!(names(&v, "report hwp").is_empty());
-        let (total, hits) = search([&v], "s", 1); // "Users", "Windows"
+        let (total, hits) = search([&v], &Scope::All, "s", 1).unwrap(); // "Users", "Windows"
         assert_eq!((total, hits.len()), (2, 1)); // total counts beyond the limit
+    }
+
+    #[test]
+    fn scopes_limit_results_to_a_folder() {
+        let v = sample();
+        let under = Scope::Under(PathBuf::from(r"C:\Users"));
+        let found = search([&v], &under, "report", 100).unwrap().1;
+        assert_eq!(found.len(), 1);
+        assert_eq!(found[0].path, PathBuf::from(r"C:\Users\hp\Report 2024.docx"));
+        // Direct children only: the file is one level deeper.
+        let direct = Scope::Direct(PathBuf::from(r"C:\Users"));
+        assert!(search([&v], &direct, "report", 100).unwrap().1.is_empty());
+        let direct = Scope::Direct(PathBuf::from(r"C:\Users\hp"));
+        assert_eq!(search([&v], &direct, "report", 100).unwrap().1.len(), 1);
+        // Wildcards and regexes work through the same search.
+        assert_eq!(search([&v], &Scope::All, "*.docx", 100).unwrap().1.len(), 1);
+        assert_eq!(search([&v], &Scope::All, r"re:^보고", 100).unwrap().1.len(), 1);
+    }
+
+    #[test]
+    fn scope_round_trips_on_the_wire() {
+        for (scope, kind, path) in [
+            (Scope::All, "a", ""),
+            (Scope::Under(PathBuf::from(r"C:\a b")), "u", r"C:\a b"),
+            (Scope::Direct(PathBuf::from(r"C:\a b")), "d", r"C:\a b"),
+        ] {
+            let (k, p) = encode_scope(&scope);
+            assert_eq!((k, p.as_str()), (kind, path));
+            assert_eq!(decode_scope(k, &p), Some(scope));
+        }
+        assert_eq!(decode_scope("x", ""), None);
     }
 
     #[test]

@@ -4,6 +4,7 @@ pub mod content;
 pub mod icons;
 pub mod index;
 pub mod menu;
+pub mod search;
 pub mod shell;
 pub mod watch;
 

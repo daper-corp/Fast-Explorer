@@ -14,10 +14,12 @@ use fex_core::content;
 use fex_core::icons::{self, IconKey};
 use fex_core::index::{self, QueryError, Results};
 use fex_core::menu::{HANG_LIMIT, MenuHost, MenuItem, MenuResult, Request};
+use fex_core::search::{self, Pattern, Scope};
 use fex_core::shell::{self, Op};
 use fex_core::watch;
 use fex_core::{Entry, SortKey, format_filetime, format_size, list_dir, sort_order};
 use popup::{Own, SEP, own};
+use tree::{FlatTree, RowMeta, SearchTree, file_entry, synthetic_folder};
 use slint::platform::{Key, PointerEventButton, WindowEvent};
 use slint::{ComponentHandle, Model, ModelNotify, ModelRc, ModelTracker, Rgba8Pixel, SharedPixelBuffer, SharedString, VecModel};
 use windows::Win32::Foundation::{HWND, LPARAM, LRESULT, POINT, RECT, WPARAM};
@@ -32,12 +34,13 @@ use windows::Win32::UI::Input::KeyboardAndMouse::{GetAsyncKeyState, VK_LBUTTON};
 use windows::Win32::UI::Shell::{DefSubclassProc, SetWindowSubclass};
 use windows::Win32::UI::WindowsAndMessaging::{
     AllowSetForegroundWindow, GetCursorPos, GetWindowRect, HTBOTTOM, HTBOTTOMLEFT, HTBOTTOMRIGHT, HTLEFT, HTRIGHT,
-    HTTOP, HTTOPLEFT, HTTOPRIGHT, IsZoomed, PostMessageW, WM_CLOSE, WM_NCHITTEST, WM_SIZE, WM_XBUTTONDOWN,
-    WM_XBUTTONUP, XBUTTON1, XBUTTON2,
+    HTTOP, HTTOPLEFT, HTTOPRIGHT, IsZoomed, PostMessageW, WM_CLOSE, WM_DEVICECHANGE, WM_NCHITTEST, WM_SIZE,
+    WM_XBUTTONDOWN, WM_XBUTTONUP, XBUTTON1, XBUTTON2,
 };
 
 mod dnd;
 mod popup;
+mod tree;
 
 slint::include_modules!();
 
@@ -57,6 +60,7 @@ const CMD_MORE: u32 = 0x800C;
 const CMD_RETRY: u32 = 0x800D;
 const CMD_NEW_FILE: u32 = 0x800E;
 const CMD_ADD_FAVORITE: u32 = 0x800F;
+const CMD_SEARCH_HERE: u32 = 0x8010;
 
 /// How long a right-click waits for a shell menu that isn't prefetched yet.
 const MENU_WAIT: Duration = Duration::from_millis(150);
@@ -65,6 +69,40 @@ const MENU_WAIT: Duration = Duration::from_millis(150);
 const SEARCH_LIMIT: usize = 2000;
 /// Content search stops after this many matching files.
 const CONTENT_LIMIT: usize = 5000;
+
+/// The shell namespace path of "내 PC". It cannot collide with a file-system path.
+const THIS_PC: &str = r"::{20D04FE0-3AEA-1069-A2D8-08002B30309D}";
+/// FILE_ATTRIBUTE_DIRECTORY, for the synthetic rows of the "내 PC" view.
+const ATTR_DIR: u32 = 0x10;
+
+fn is_this_pc(path: &Path) -> bool {
+    path.to_string_lossy().eq_ignore_ascii_case(THIS_PC)
+}
+
+/// The tab is showing the virtual "내 PC" rows (not search results opened from it).
+fn at_this_pc(t: &Tab) -> bool {
+    t.search.borrow().is_none() && is_this_pc(&t.cwd.borrow())
+}
+
+/// "내 PC", "내PC", "this pc" (any case) are all accepted in the address bar.
+fn is_this_pc_name(text: &str) -> bool {
+    let t = text.trim().to_lowercase();
+    t == "내 pc" || t == "내pc" || t == "this pc" || t == "thispc" || t == THIS_PC.to_lowercase()
+}
+
+/// Drives and user folders shown by the "내 PC" view, built off the UI thread.
+struct ThisPcRow {
+    title: String,
+    path: PathBuf,
+    kind: String,
+    /// "여유 공간" column.
+    date: String,
+    /// "전체 용량" column.
+    size: String,
+    usage: f32,
+    free: u64,
+    total: u64,
+}
 
 /// "내용:hello" / "content:hello" -> Some("hello"): search inside files.
 fn content_query(q: &str) -> Option<String> {
@@ -89,6 +127,15 @@ struct Rows {
     editing: Cell<Option<u32>>,
     /// Folder of each entry, for search hits (empty when listing a folder).
     locations: RefCell<Vec<String>>,
+    /// Search-tree display facts (empty when listing a folder or showing "내 PC").
+    meta: RefCell<Vec<RowMeta>>,
+    /// Per-entry overrides used by the virtual "내 PC" view. They stay empty for real folders,
+    /// so row_data falls back to the entry itself.
+    paths: RefCell<Vec<String>>,
+    kinds: RefCell<Vec<String>>,
+    dates: RefCell<Vec<String>>,
+    sizes: RefCell<Vec<String>>,
+    usage: RefCell<Vec<f32>>,
     /// The folder being listed (for icons that come from the file itself).
     base: RefCell<PathBuf>,
     notify: ModelNotify,
@@ -115,20 +162,41 @@ impl Model for Rows {
             Some(p) if p > 0 && !e.is_dir() => p,
             _ => name.len(),
         };
-        let icon = icon_image(IconKey::for_entry(e.is_dir(), &ext, || match self.locations.borrow().get(i as usize) {
-            Some(dir) => PathBuf::from(dir).join(e.os_name()),
-            None => self.base.borrow().join(e.os_name()),
-        }));
+        let icon = match self.paths.borrow().get(i as usize) {
+            Some(path) => icon_image(IconKey::File(PathBuf::from(path))),
+            None => icon_image(IconKey::for_entry(e.is_dir(), &ext, || match self.locations.borrow().get(i as usize) {
+                Some(dir) => PathBuf::from(dir).join(e.os_name()),
+                None => self.base.borrow().join(e.os_name()),
+            })),
+        };
+        let date = match self.dates.borrow().get(i as usize).filter(|s| !s.is_empty()) {
+            Some(s) => s.clone(),
+            None => format_filetime(e.modified),
+        };
+        let kind = match self.kinds.borrow().get(i as usize).filter(|s| !s.is_empty()) {
+            Some(s) => s.clone(),
+            None => kind_of(e),
+        };
+        let size = match self.sizes.borrow().get(i as usize).filter(|s| !s.is_empty()) {
+            Some(s) => s.clone(),
+            None if e.is_dir() => String::new(),
+            None => format_size(e.size),
+        };
+        let meta = self.meta.borrow().get(i as usize).copied().unwrap_or_default();
         Some(Row {
-            date: format_filetime(e.modified).into(),
-            kind: kind_of(e).into(),
-            size: if e.is_dir() { SharedString::new() } else { format_size(e.size).into() },
+            date: date.into(),
+            kind: kind.into(),
+            size: size.into(),
             selected: self.selected.borrow()[i as usize],
             editing: self.editing.get() == Some(i),
             stem: stem as i32,
             name: name.into(),
             location: self.locations.borrow().get(i as usize).map(|s| s.as_str().into()).unwrap_or_default(),
+            depth: meta.depth as i32,
+            expandable: meta.expandable,
+            expanded: meta.expanded,
             icon,
+            usage: self.usage.borrow().get(i as usize).copied().unwrap_or(-1.0),
         })
     }
 
@@ -163,6 +231,63 @@ impl Rows {
         *self.entries.borrow_mut() = Arc::new(entries);
         *self.order.borrow_mut() = order;
         self.locations.borrow_mut().clear();
+        self.meta.borrow_mut().clear();
+        self.paths.borrow_mut().clear();
+        self.kinds.borrow_mut().clear();
+        self.dates.borrow_mut().clear();
+        self.sizes.borrow_mut().clear();
+        self.usage.borrow_mut().clear();
+        self.editing.set(None);
+        self.notify.reset();
+    }
+
+    /// Shows a search tree: entries are tree nodes and `flat` is the expanded part.
+    fn replace_search(&self, entries: Vec<Entry>, flat: FlatTree) {
+        *self.selected.borrow_mut() = vec![false; entries.len()];
+        *self.entries.borrow_mut() = Arc::new(entries);
+        self.paths.borrow_mut().clear();
+        self.kinds.borrow_mut().clear();
+        self.dates.borrow_mut().clear();
+        self.sizes.borrow_mut().clear();
+        self.usage.borrow_mut().clear();
+        self.editing.set(None);
+        self.apply_flat(flat);
+    }
+
+    /// Updates the visible part of an already-loaded search tree, keeping its entries.
+    fn update_search(&self, flat: FlatTree) {
+        self.selected.borrow_mut().resize(self.entries.borrow().len(), false);
+        self.apply_flat(flat);
+    }
+
+    fn apply_flat(&self, flat: FlatTree) {
+        *self.order.borrow_mut() = flat.order;
+        *self.meta.borrow_mut() = flat.metas;
+        *self.locations.borrow_mut() = flat.locations;
+        self.notify.reset();
+    }
+
+    /// Replaces the model with the synthetic "내 PC" rows and their per-row columns.
+    fn replace_virtual(
+        &self,
+        entries: Vec<Entry>,
+        order: Vec<u32>,
+        paths: Vec<String>,
+        kinds: Vec<String>,
+        dates: Vec<String>,
+        sizes: Vec<String>,
+        usage: Vec<f32>,
+    ) {
+        *self.selected.borrow_mut() = vec![false; entries.len()];
+        *self.entries.borrow_mut() = Arc::new(entries);
+        *self.order.borrow_mut() = order;
+        *self.paths.borrow_mut() = paths;
+        *self.kinds.borrow_mut() = kinds;
+        *self.dates.borrow_mut() = dates;
+        *self.sizes.borrow_mut() = sizes;
+        *self.usage.borrow_mut() = usage;
+        self.locations.borrow_mut().clear();
+        self.meta.borrow_mut().clear();
         self.editing.set(None);
         self.notify.reset();
     }
@@ -228,6 +353,21 @@ enum Hist {
     Go(usize),
 }
 
+/// Records a visit in the tab's history (both real folders and the virtual "내 PC").
+fn record_history(t: &Tab, path: &Path, hist: Hist) {
+    let mut h = t.history.borrow_mut();
+    match hist {
+        Hist::Go(i) => t.hist_pos.set(i),
+        Hist::Push if h.is_empty() => h.push(path.to_path_buf()),
+        Hist::Push if h[t.hist_pos.get()] != path => {
+            h.truncate(t.hist_pos.get() + 1);
+            h.push(path.to_path_buf());
+            t.hist_pos.set(h.len() - 1);
+        }
+        Hist::Push => {}
+    }
+}
+
 /// Applied once the next listing of a tab is ready.
 #[derive(Default)]
 struct After {
@@ -235,6 +375,48 @@ struct After {
     rename: bool,
     /// The listing came from the folder watcher, not from the user.
     auto: bool,
+}
+
+/// Where the search box looks. The path-typed query can override the first two.
+#[derive(Clone, Copy, PartialEq, Eq, Debug, Default)]
+enum ScopeKind {
+    Current,
+    Subtree,
+    #[default]
+    All,
+}
+
+impl ScopeKind {
+    fn from_index(i: i32) -> Self {
+        match i {
+            0 => ScopeKind::Current,
+            1 => ScopeKind::Subtree,
+            _ => ScopeKind::All,
+        }
+    }
+
+    fn index(self) -> i32 {
+        match self {
+            ScopeKind::Current => 0,
+            ScopeKind::Subtree => 1,
+            ScopeKind::All => 2,
+        }
+    }
+
+    fn scope(self, cwd: &Path) -> Scope {
+        match self {
+            ScopeKind::Current => Scope::Direct(cwd.to_path_buf()),
+            ScopeKind::Subtree => Scope::Under(cwd.to_path_buf()),
+            ScopeKind::All => Scope::All,
+        }
+    }
+}
+
+/// The active search: what was asked, where it looked, and its folder tree.
+struct Search {
+    query: String,
+    scope: Scope,
+    tree: SearchTree,
 }
 
 struct Tab {
@@ -256,8 +438,12 @@ struct Tab {
     list_ms: Cell<f64>,
     note: RefCell<String>,
     scroll: Cell<f32>,
-    /// Showing search results instead of the folder: (query, path of each entry).
-    search: RefCell<Option<(String, Vec<PathBuf>)>>,
+    /// Showing search results instead of the folder.
+    search: RefCell<Option<Search>>,
+    /// The scope chosen in the search box for this tab.
+    search_scope: Cell<ScopeKind>,
+    /// Matching items in the current search (hidden ones excluded).
+    hit_count: Cell<usize>,
     /// Reports changes made to the folder by other programs.
     watch: RefCell<Option<watch::DirWatch>>,
     /// A watcher-triggered refresh is scheduled; further events join it.
@@ -283,6 +469,8 @@ impl Tab {
             note: RefCell::default(),
             scroll: Cell::new(0.0),
             search: RefCell::default(),
+            search_scope: Cell::new(ScopeKind::All),
+            hit_count: Cell::new(0),
             watch: RefCell::new(watch::DirWatch::new(move || post(move |a| a.folder_changed(id))).ok()),
             refresh_due: Cell::new(false),
         }
@@ -290,18 +478,26 @@ impl Tab {
 
     /// Exact path (from the raw UTF-16 name, not the lossy display string).
     fn path_of(&self, idx: u32) -> PathBuf {
-        if let Some((_, paths)) = &*self.search.borrow() {
-            return paths[idx as usize].clone();
+        if let Some(path) = self.rows.paths.borrow().get(idx as usize) {
+            return PathBuf::from(path);
+        }
+        if let Some(search) = &*self.search.borrow()
+            && let Some(path) = search.tree.path(idx)
+        {
+            return path.to_path_buf();
         }
         self.cwd.borrow().join(self.rows.entries.borrow()[idx as usize].os_name())
     }
 
     fn query(&self) -> Option<String> {
-        self.search.borrow().as_ref().map(|s| s.0.clone())
+        self.search.borrow().as_ref().map(|s| s.query.clone())
     }
 
     fn title(&self) -> String {
         let cwd = self.cwd.borrow();
+        if is_this_pc(&cwd) {
+            return "내 PC".into();
+        }
         match cwd.file_name() {
             Some(n) => n.to_string_lossy().into_owned(),
             None => cwd.display().to_string(),
@@ -335,7 +531,11 @@ struct App {
     favorites: RefCell<Vec<PathBuf>>,
     desktop: Option<PathBuf>,
     downloads: Option<PathBuf>,
-    drives: Vec<shell::Drive>,
+    drives: RefCell<Vec<shell::Drive>>,
+    /// A WM_DEVICECHANGE refresh is already scheduled.
+    devices_due: Cell<bool>,
+    /// The newest address-bar suggestion request; older workers are dropped.
+    suggest_seq: Arc<AtomicU64>,
     /// A left press may turn into a drag; cleared when the drag starts.
     drag_armed: Cell<bool>,
     /// Pressing an already-selected row keeps the selection until release, so it can be dragged.
@@ -481,7 +681,9 @@ impl App {
         }
         let ui = self.ui();
         let cwd = t.cwd.borrow().clone();
-        ui.set_path(cwd.display().to_string().into());
+        let this_pc = is_this_pc(&cwd);
+        ui.set_this_pc(this_pc);
+        ui.set_path(if this_pc { "내 PC".to_string() } else { cwd.display().to_string() }.into());
         ui.set_crumbs(ModelRc::from(Rc::new(VecModel::from(crumbs_for(&cwd)))));
         ui.set_folder(t.title().into());
         let (pos, len) = (t.hist_pos.get(), t.history.borrow().len());
@@ -493,6 +695,7 @@ impl App {
         let query = t.query();
         ui.set_search_mode(query.is_some());
         ui.set_search_text(query.unwrap_or_default().into());
+        ui.set_search_scope(t.search_scope.get().index());
         self.sync_tabs();
         self.sync_places();
         self.update_status(t);
@@ -506,7 +709,7 @@ impl App {
         let cwd = self.tab().cwd.borrow().clone();
         let favorites: Vec<Place> = self.favorites.borrow().iter().map(|p| self.place(p, &cwd, true)).collect();
         let drives: Vec<Place> =
-            self.drives.iter().map(|d| self.place_drive(d, &cwd)).collect();
+            self.drives.borrow().iter().map(|d| self.place_drive(d, &cwd)).collect();
         ui.set_favorites(ModelRc::from(Rc::new(VecModel::from(favorites))));
         ui.set_drives(ModelRc::from(Rc::new(VecModel::from(drives))));
     }
@@ -558,7 +761,7 @@ impl App {
 
     fn add_favorite_path(&self, path: PathBuf) {
         let t = self.tab();
-        if path.as_os_str().is_empty() {
+        if path.as_os_str().is_empty() || is_this_pc(&path) {
             return;
         }
         {
@@ -585,9 +788,17 @@ impl App {
     }
 
     fn status_text(&self, t: &Tab) -> String {
-        let n = t.rows.len();
+        // In search mode the list contains folder rows too; count the matching items.
+        let search = t.search.borrow().is_some();
+        let n = match search {
+            true => t.hit_count.get(),
+            false => t.rows.len(),
+        };
         let sel = t.rows.selected.borrow().iter().filter(|&&s| s).count();
-        let mut s = format!("{n}개 항목");
+        let mut s = match search {
+            true => format!("{n}개 일치"),
+            false => format!("{n}개 항목"),
+        };
         if sel > 0 {
             s += &format!(" · {sel}개 선택");
         }
@@ -634,12 +845,54 @@ impl App {
         self.update_status(t);
     }
 
+    // ---------- address-bar autocomplete ----------
+
+    /// Asks a worker for path suggestions; the newest request wins.
+    fn suggest(&self, text: &str) {
+        let seq = self.suggest_seq.fetch_add(1, SeqCst) + 1;
+        let latest = self.suggest_seq.clone();
+        let cwd = self.tab().cwd.borrow().clone();
+        // From "내 PC" a bare relative name is not meaningful; suggest from the system drive.
+        let cwd = if is_this_pc(&cwd) { PathBuf::from(r"C:\") } else { cwd };
+        let text = text.to_string();
+        thread::spawn(move || {
+            thread::sleep(Duration::from_millis(120)); // let typing settle
+            if latest.load(SeqCst) != seq {
+                return;
+            }
+            let items = suggest_paths(&text, &cwd);
+            if latest.load(SeqCst) != seq {
+                return;
+            }
+            post(move |a| a.suggestions_ready(seq, items));
+        });
+    }
+
+    fn suggestions_ready(&self, seq: u64, items: Vec<Suggest>) {
+        if self.suggest_seq.load(SeqCst) != seq {
+            return;
+        }
+        let ui = self.ui();
+        ui.set_suggest_index(-1);
+        ui.set_suggestions(ModelRc::from(Rc::new(VecModel::from(items))));
+    }
+
+    fn cancel_suggest(&self) {
+        self.suggest_seq.fetch_add(1, SeqCst);
+        let ui = self.ui();
+        ui.set_suggestions(ModelRc::from(Rc::new(VecModel::from(Vec::<Suggest>::new()))));
+        ui.set_suggest_index(-1);
+    }
+
     // ---------- loading ----------
 
     /// Lists `path` on a worker and streams it in. The old listing stays until the first batch
     /// arrives, so an unreadable folder (or a path that is now a file) leaves the tab where it was.
     /// Never opens files: only an explicit address-bar entry does that.
     fn navigate(&self, t: &Rc<Tab>, path: PathBuf, hist: Hist, after: Option<After>) {
+        if is_this_pc(&path) {
+            return self.open_this_pc(t, hist, after);
+        }
         let epoch = t.epoch.fetch_add(1, SeqCst) + 1;
         t.refresh_due.set(false);
         *t.pending.borrow_mut() = Some((path.clone(), hist, after));
@@ -668,19 +921,7 @@ impl App {
         t.cursor.set(None);
         t.anchor.set(None);
         *t.after.borrow_mut() = after;
-        {
-            let mut h = t.history.borrow_mut();
-            match hist {
-                Hist::Go(i) => t.hist_pos.set(i),
-                Hist::Push if h.is_empty() => h.push(path.clone()),
-                Hist::Push if h[t.hist_pos.get()] != path => {
-                    h.truncate(t.hist_pos.get() + 1);
-                    h.push(path.clone());
-                    t.hist_pos.set(h.len() - 1);
-                }
-                Hist::Push => {}
-            }
-        }
+        record_history(t, &path, hist);
         *t.rows.base.borrow_mut() = path.clone();
         if let Some(w) = t.watch.borrow().as_ref() {
             w.watch(path.clone());
@@ -692,6 +933,111 @@ impl App {
             t.scroll.set(0.0);
         }
         self.sync_view(t);
+    }
+
+    /// Shows the virtual "내 PC" view: user folders and mounted drives with their free space.
+    fn open_this_pc(&self, t: &Rc<Tab>, hist: Hist, after: Option<After>) {
+        t.pending.take();
+        t.search.take();
+        self.search_seq.fetch_add(1, SeqCst);
+        t.bump_sort();
+        t.rows.replace(Vec::new(), Vec::new());
+        t.cursor.set(None);
+        t.anchor.set(None);
+        *t.after.borrow_mut() = after;
+        let path = PathBuf::from(THIS_PC);
+        record_history(t, &path, hist);
+        // The folder watcher has nothing to watch here; point it away so the previous
+        // folder's events don't refresh this view.
+        if let Some(w) = t.watch.borrow().as_ref() {
+            w.watch(path.clone());
+        }
+        *t.rows.base.borrow_mut() = PathBuf::new();
+        *t.cwd.borrow_mut() = path;
+        if self.is_active(t) {
+            self.ui().set_list_y(0.0);
+        } else {
+            t.scroll.set(0.0);
+        }
+        self.sync_view(t);
+        self.load_this_pc(t);
+    }
+
+    fn load_this_pc(&self, t: &Rc<Tab>) {
+        if t.query().is_some() {
+            return; // search results are showing instead
+        }
+        let epoch = t.epoch.fetch_add(1, SeqCst) + 1;
+        t.refresh_due.set(false);
+        let id = t.id;
+        self.set_note(t, "불러오는 중…".into());
+        thread::spawn(move || {
+            let drives = shell::drives();
+            let rows = build_this_pc_rows(&drives);
+            post(move |a| a.this_pc_loaded(id, epoch, drives, rows));
+        });
+    }
+
+    fn this_pc_loaded(&self, id: u64, epoch: u64, drives: Vec<shell::Drive>, rows: Vec<ThisPcRow>) {
+        let Some(t) = self.current(id, epoch) else { return };
+        if !is_this_pc(&t.cwd.borrow()) || t.query().is_some() {
+            return;
+        }
+        *self.drives.borrow_mut() = drives;
+        self.sync_places();
+        self.apply_this_pc_rows(&t, rows);
+    }
+
+    fn apply_this_pc_rows(&self, t: &Rc<Tab>, rows: Vec<ThisPcRow>) {
+        let entries: Vec<Entry> = rows
+            .iter()
+            .map(|r| Entry::new(std::ffi::OsStr::new(&r.title), r.total, r.free as i64, ATTR_DIR))
+            .collect();
+        let paths: Vec<String> = rows.iter().map(|r| r.path.display().to_string()).collect();
+        let kinds: Vec<String> = rows.iter().map(|r| r.kind.clone()).collect();
+        let dates: Vec<String> = rows.iter().map(|r| r.date.clone()).collect();
+        let sizes: Vec<String> = rows.iter().map(|r| r.size.clone()).collect();
+        let usage: Vec<f32> = rows.iter().map(|r| r.usage).collect();
+        let (key, desc) = t.sort.get();
+        let mut order = display_order(&entries, key, desc);
+        // Keep Explorer's grouping: user folders first, then drives. A stable sort preserves
+        // the column order inside each group.
+        group_this_pc_order(&mut order, &kinds);
+        t.rows.replace_virtual(entries, order, paths, kinds, dates, sizes, usage);
+        *t.note.borrow_mut() = String::new();
+        t.list_ms.set(0.0);
+        self.sync_fit(t);
+        self.update_status(t);
+    }
+
+    /// A device was added or removed: refresh the sidebar and the "내 PC" view once the
+    /// burst of WM_DEVICECHANGE messages settles.
+    fn devices_changed(&self) {
+        if self.devices_due.replace(true) {
+            return;
+        }
+        slint::Timer::single_shot(Duration::from_millis(600), || post(|a| a.refresh_drives()));
+    }
+
+    fn refresh_drives(&self) {
+        self.devices_due.set(false);
+        let id = self.tab().id;
+        thread::spawn(move || {
+            let drives = shell::drives();
+            let rows = build_this_pc_rows(&drives);
+            post(move |a| a.drives_refreshed(id, drives, rows));
+        });
+    }
+
+    fn drives_refreshed(&self, id: u64, drives: Vec<shell::Drive>, rows: Vec<ThisPcRow>) {
+        *self.drives.borrow_mut() = drives;
+        self.sync_places();
+        let Some(t) = self.find(id) else { return };
+        if !is_this_pc(&t.cwd.borrow()) || t.query().is_some() || t.pending.borrow().is_some() {
+            return;
+        }
+        t.epoch.fetch_add(1, SeqCst); // any in-flight snapshot is now older
+        self.apply_this_pc_rows(&t, rows);
     }
 
     fn batch(&self, id: u64, epoch: u64, batch: Vec<Entry>) {
@@ -732,10 +1078,25 @@ impl App {
     fn resort(&self, t: &Rc<Tab>) {
         t.bump_sort();
         let seq = t.sort_gen.get();
+        let (key, desc) = t.sort.get();
+        // A search tree sorts within each folder, so it is cheap enough to do here.
+        if t.search.borrow().is_some() {
+            let flat = {
+                let search = t.search.borrow();
+                let search = search.as_ref().expect("checked above");
+                let entries = t.rows.entries.borrow();
+                search.tree.flatten(&entries, key, desc, SHOW_HIDDEN.load(Relaxed))
+            };
+            t.hit_count.set(flat.hits);
+            t.rows.apply_flat(flat);
+            self.reveal_cursor(t);
+            self.sync_fit(t);
+            self.update_status(t);
+            return;
+        }
         let entries = t.rows.entries.borrow().clone();
         // Identifies the list being sorted. (The order's length can't: hidden items are left out.)
         let sorting = (Arc::as_ptr(&entries) as usize, entries.len());
-        let (key, desc) = t.sort.get();
         let id = t.id;
         thread::spawn(move || {
             let start = Instant::now();
@@ -751,9 +1112,14 @@ impl App {
             let entries = t.rows.entries.borrow();
             (Arc::as_ptr(&entries) as usize, entries.len())
         };
-        // Stale if the user navigated or sorted again, or entries changed while sorting.
-        if seq != t.sort_gen.get() || sorting != current {
+        // Stale if the user navigated, searched or sorted again, or entries changed while sorting.
+        if seq != t.sort_gen.get() || sorting != current || t.search.borrow().is_some() {
             return;
+        }
+        let mut order = order;
+        if at_this_pc(&t) {
+            let kinds = t.rows.kinds.borrow();
+            group_this_pc_order(&mut order, &kinds);
         }
         *t.rows.order.borrow_mut() = order;
         if t.search.borrow().is_none() {
@@ -770,6 +1136,9 @@ impl App {
     fn reload(&self, t: &Rc<Tab>, after: After) {
         if let Some(q) = t.query() {
             return self.search_in(t, q); // refresh the results instead
+        }
+        if is_this_pc(&t.cwd.borrow()) {
+            return self.load_this_pc(t);
         }
         let epoch = t.epoch.fetch_add(1, SeqCst) + 1;
         *t.after.borrow_mut() = Some(after);
@@ -908,11 +1277,14 @@ impl App {
         if !self.drag_armed.replace(false) {
             return;
         }
+        let t = self.tab();
+        if at_this_pc(&t) {
+            return;
+        }
         // `moved` also fires while another mouse button is held; only a left drag counts.
         if unsafe { GetAsyncKeyState(VK_LBUTTON.0 as i32) } as u16 & 0x8000 == 0 {
             return;
         }
-        let t = self.tab();
         let Some(idx) = t.rows.entry(row) else { return };
         if t.rows.editing.get().is_some() {
             return;
@@ -1135,6 +1507,10 @@ impl App {
                 }
                 self.update_status(&t);
             }
+            // A search-tree folder collapses/expands with Left/Right; other rows move normally.
+            _ if (is(Key::LeftArrow) || is(Key::RightArrow))
+                && t.search.borrow().is_some()
+                && self.tree_arrow(&t, is(Key::RightArrow)) => {}
             _ if is(Key::UpArrow) || is(Key::DownArrow) || is(Key::Home) || is(Key::End)
                 || is(Key::PageUp) || is(Key::PageDown) =>
             {
@@ -1216,6 +1592,9 @@ impl App {
     fn up(&self) {
         let t = self.tab();
         let cwd = t.cwd.borrow().clone();
+        if is_this_pc(&cwd) {
+            return;
+        }
         if let (Some(parent), Some(name)) = (cwd.parent(), cwd.file_name()) {
             let after = After { select: vec![name.to_string_lossy().into_owned()], ..Default::default() };
             self.navigate(&t, parent.to_path_buf(), Hist::Push, Some(after));
@@ -1228,10 +1607,26 @@ impl App {
         if s.is_empty() {
             return;
         }
+        if is_this_pc_name(&s) {
+            return self.navigate(&t, PathBuf::from(THIS_PC), Hist::Push, None);
+        }
         if s.len() == 2 && s.ends_with(':') {
             s.push('\\'); // "D:" means the drive root here, not D:'s current directory
         }
-        let p = t.cwd.borrow().join(s); // absolute input replaces cwd
+        let cwd = t.cwd.borrow().clone();
+        // Relative names have no meaning in the virtual "내 PC" folder; a leading "\" is
+        // resolved against the system drive, like Explorer's current-drive notation.
+        let p = if is_this_pc(&cwd) {
+            if Path::new(&s).is_absolute() {
+                PathBuf::from(&s)
+            } else if s.starts_with('\\') {
+                PathBuf::from(format!("C:{s}"))
+            } else {
+                return self.set_note(&t, "전체 경로를 입력하세요".into());
+            }
+        } else {
+            cwd.join(&s) // absolute input replaces cwd
+        };
         self.ui().invoke_focus_list();
         // The user typed this path, so a file is opened; anything else is navigated to.
         let id = t.id;
@@ -1278,23 +1673,134 @@ impl App {
         if let Some(text) = content_query(&query) {
             return self.content_search(t, query, text);
         }
+        let cwd = t.cwd.borrow().clone();
+        if cwd.as_os_str().is_empty() {
+            return;
+        }
+        // "내 PC" has no files of its own; search every drive unless the query names a path.
+        let chosen = match is_this_pc(&cwd) {
+            true => Scope::All,
+            false => t.search_scope.get().scope(&cwd),
+        };
+        let plan = match search::plan(&query, &cwd, &chosen) {
+            Ok(plan) => plan,
+            Err(e) => return self.set_note(t, e),
+        };
+        let pattern = match Pattern::compile(&plan.pattern) {
+            Ok(pattern) => pattern,
+            Err(e) => return self.set_note(t, e),
+        };
         let seq = self.search_seq.fetch_add(1, SeqCst) + 1;
+        match plan.scope.clone() {
+            Scope::Direct(root) => self.direct_search(t, query, root, pattern, seq),
+            Scope::Under(root) if index::is_indexable(&root) => {
+                self.index_or_walk(t.id, query, plan.scope, plan.pattern, seq, false)
+            }
+            Scope::Under(root) => {
+                let (id, latest) = (t.id, self.search_seq.clone());
+                thread::spawn(move || walk_search_worker(id, seq, latest, root, query, pattern));
+            }
+            Scope::All => self.index_or_walk(t.id, query, plan.scope, plan.pattern, seq, true),
+        }
+    }
+
+    /// One folder only: lists it and keeps the entries that match.
+    fn direct_search(&self, t: &Rc<Tab>, query: String, root: PathBuf, pattern: Pattern, seq: u64) {
         let (id, latest) = (t.id, self.search_seq.clone());
         thread::spawn(move || {
             let start = Instant::now();
-            let r = index::query(&query, SEARCH_LIMIT);
+            let mut entries = Vec::new();
+            let mut tree = SearchTree::default();
+            tree.root(&mut entries, &root);
+            let mut more = false;
+            let mut count = 0usize;
+            let res = list_dir(&root, |batch| {
+                if latest.load(SeqCst) != seq {
+                    return false; // typed on; a newer search is running
+                }
+                for e in batch {
+                    if pattern.matches(&e.name()) {
+                        let dir = e.is_dir();
+                        let path = root.join(e.os_name());
+                        tree.insert(&mut entries, &path, dir, Some(e), Some(&root));
+                        count += 1;
+                        if count >= SEARCH_LIMIT {
+                            more = true;
+                            return false;
+                        }
+                    }
+                }
+                true
+            });
             let took = start.elapsed();
             if latest.load(SeqCst) != seq {
-                return; // typed on; a newer search is running
+                return;
+            }
+            post(move |a| {
+                a.direct_found(
+                    id,
+                    seq,
+                    query,
+                    Scope::Direct(root),
+                    entries,
+                    tree,
+                    took,
+                    more,
+                    res.err().map(|e| e.to_string()),
+                )
+            });
+        });
+    }
+
+    /// The index is the fast path; a subtree on a non-indexed volume (or without the service)
+    /// falls back to walking the folder.
+    fn index_or_walk(&self, id: u64, query: String, scope: Scope, pattern: String, seq: u64, offer_install: bool) {
+        let latest = self.search_seq.clone();
+        thread::spawn(move || {
+            let start = Instant::now();
+            let r = index::query(&scope, &pattern, SEARCH_LIMIT);
+            let took = start.elapsed();
+            if latest.load(SeqCst) != seq {
+                return;
             }
             match r {
                 Ok(res) => {
-                    // The index holds names only; size and date come from the file system.
-                    let entries = res.hits.iter().map(hit_entry).collect();
-                    post(move |a| a.found(id, seq, query, res, entries, took));
+                    let (entries, tree) = tree_from_hits(&res.hits, &scope);
+                    post(move |a| a.found(id, seq, query, scope, res, entries, tree, took));
                 }
-                Err(QueryError::NotInstalled) => post(move |a| a.offer_install(id, query)),
-                Err(QueryError::Unavailable(e)) => post(move |a| {
+                Err(QueryError::NotInstalled) if offer_install => {
+                    post(move |a| a.offer_install(id, query))
+                }
+                Err(e @ (QueryError::NotInstalled | QueryError::Unavailable(_))) => {
+                    match scope.root().map(Path::to_path_buf) {
+                        Some(root) => {
+                            let pattern = match Pattern::compile(&pattern) {
+                                Ok(pattern) => pattern,
+                                Err(e) => {
+                                    return post(move |a| {
+                                        if let Some(t) = a.find(id) {
+                                            a.set_note(&t, e);
+                                        }
+                                    });
+                                }
+                            };
+                            walk_search_worker(id, seq, latest, root, query, pattern);
+                        }
+                        None => {
+                            let message = match e {
+                                QueryError::NotInstalled => "검색에는 인덱스 서비스가 필요함".to_string(),
+                                QueryError::Unavailable(e) => format!("검색할 수 없음: {e}"),
+                                QueryError::Rejected(e) => e,
+                            };
+                            post(move |a| {
+                                if let Some(t) = a.find(id) {
+                                    a.set_note(&t, message);
+                                }
+                            });
+                        }
+                    }
+                }
+                Err(QueryError::Rejected(e)) => post(move |a| {
                     if let Some(t) = a.find(id) {
                         a.set_note(&t, format!("검색할 수 없음: {e}"));
                     }
@@ -1303,42 +1809,53 @@ impl App {
         });
     }
 
-    fn found(&self, id: u64, seq: u64, query: String, res: Results, entries: Vec<Entry>, took: Duration) {
+    /// Applies a finished result set (entries plus tree) to the tab.
+    fn install_search(&self, t: &Rc<Tab>, query: String, scope: Scope, entries: Vec<Entry>, tree: SearchTree) {
+        t.epoch.fetch_add(1, SeqCst); // drop any folder listing still arriving
+        t.pending.take();
+        t.bump_sort();
+        let flat = {
+            let (key, desc) = t.sort.get();
+            tree.flatten(&entries, key, desc, SHOW_HIDDEN.load(Relaxed))
+        };
+        t.hit_count.set(flat.hits);
+        t.rows.replace_search(entries, flat);
+        t.cursor.set(None);
+        t.anchor.set(None);
+        *t.search.borrow_mut() = Some(Search { query, scope, tree });
+    }
+
+    #[allow(clippy::too_many_arguments)]
+    fn found(&self, id: u64, seq: u64, query: String, scope: Scope, res: Results, entries: Vec<Entry>, tree: SearchTree, took: Duration) {
         let Some(t) = self.find(id) else { return };
         if self.search_seq.load(SeqCst) != seq {
             return;
         }
-        t.epoch.fetch_add(1, SeqCst); // drop any folder listing still arriving
-        t.pending.take();
-        let (key, desc) = t.sort.get();
-        let order = display_order(&entries, key, desc);
-        let paths: Vec<PathBuf> = res.hits.into_iter().map(|h| h.path).collect();
-        let locations = paths.iter().map(|p| p.parent().map(|d| d.display().to_string()).unwrap_or_default()).collect();
-        t.bump_sort();
-        t.rows.replace(entries, order);
-        *t.rows.locations.borrow_mut() = locations;
-        t.cursor.set(None);
-        t.anchor.set(None);
+        let returned = res.hits.len();
+        let (more, indexing) = (res.more, res.indexing);
+        let root = scope.root().map(Path::to_path_buf);
+        self.install_search(&t, query.clone(), scope, entries, tree);
         let mut note = format!("검색 {:.0} ms", ms(took));
-        if res.more {
-            note += &format!(" · 더 있음, 처음 {}개 표시", paths.len());
+        if let Some(root) = root.filter(|r| !same_path(r, &t.cwd.borrow())) {
+            note += &format!(" · {} 아래", root.display());
         }
-        if res.indexing > 0 {
+        if more {
+            note += &format!(" · 더 있음, 처음 {returned}개 표시");
+        }
+        if indexing > 0 {
             note += " · 색인 중이라 결과가 아직 일부";
             // Ask again shortly, until the index is complete.
-            let q = query.clone();
             slint::Timer::single_shot(Duration::from_secs(2), move || {
                 app(|a| {
                     if let Some(t) = a.find(id)
                         && a.search_seq.load(SeqCst) == seq
-                        && t.query().as_deref() == Some(&q)
+                        && t.query().as_deref() == Some(&query)
                     {
-                        a.search_in(&t, q);
+                        a.search_in(&t, query);
                     }
                 })
             });
         }
-        *t.search.borrow_mut() = Some((query, paths));
         *t.note.borrow_mut() = note;
         if self.is_active(&t) {
             self.ui().set_search_mode(true);
@@ -1348,21 +1865,134 @@ impl App {
         self.sync_fit(&t);
     }
 
+    /// A one-folder search finished.
+    #[allow(clippy::too_many_arguments)]
+    fn direct_found(
+        &self,
+        id: u64,
+        seq: u64,
+        query: String,
+        scope: Scope,
+        entries: Vec<Entry>,
+        tree: SearchTree,
+        took: Duration,
+        more: bool,
+        err: Option<String>,
+    ) {
+        let Some(t) = self.find(id) else { return };
+        if self.search_seq.load(SeqCst) != seq {
+            return;
+        }
+        let root = scope.root().map(Path::to_path_buf);
+        self.install_search(&t, query, scope, entries, tree);
+        let mut note = format!("검색 {:.0} ms", ms(took));
+        if let Some(root) = root.filter(|r| !same_path(r, &t.cwd.borrow())) {
+            note += &format!(" · {} 아래", root.display());
+        }
+        if more {
+            note += &format!(" · 더 있음, 처음 {SEARCH_LIMIT}개 표시");
+        }
+        if let Some(e) = err {
+            note += &format!(" · 일부만 읽음: {e}");
+        }
+        *t.note.borrow_mut() = note;
+        if self.is_active(&t) {
+            self.ui().set_search_mode(true);
+            self.ui().set_list_y(0.0);
+        }
+        self.update_status(&t);
+        self.sync_fit(&t);
+    }
+
+    /// A walk started: show an empty tree immediately; batches fill it in.
+    fn walk_begin(&self, id: u64, seq: u64, query: String, root: PathBuf, entry: Entry) {
+        let Some(t) = self.find(id) else { return };
+        if self.search_seq.load(SeqCst) != seq {
+            return;
+        }
+        t.epoch.fetch_add(1, SeqCst);
+        t.pending.take();
+        t.bump_sort();
+        let mut entries = Vec::new();
+        let mut tree = SearchTree::default();
+        tree.root_entry(&mut entries, &root, entry);
+        t.rows.replace_search(entries, FlatTree::default());
+        t.hit_count.set(0);
+        t.cursor.set(None);
+        t.anchor.set(None);
+        *t.search.borrow_mut() = Some(Search { query, scope: Scope::Under(root), tree });
+        *t.note.borrow_mut() = "색인 없이 폴더를 직접 검색 중…".into();
+        if self.is_active(&t) {
+            self.ui().set_search_mode(true);
+            self.ui().set_list_y(0.0);
+        }
+        self.update_status(&t);
+    }
+
+    /// Inserts one batch of walk hits into the search tree.
+    fn name_batch(&self, id: u64, seq: u64, hits: Vec<(PathBuf, bool)>, entries: Vec<Entry>) {
+        let Some(t) = self.find(id) else { return };
+        if self.search_seq.load(SeqCst) != seq {
+            return;
+        }
+        let flat = {
+            let mut search = t.search.borrow_mut();
+            let Some(search) = search.as_mut() else { return };
+            let base = search.scope.root().map(Path::to_path_buf);
+            let mut all = t.rows.entries.borrow_mut();
+            let nodes = Arc::make_mut(&mut all);
+            for ((path, dir), entry) in hits.into_iter().zip(entries) {
+                search.tree.insert(nodes, &path, dir, Some(entry), base.as_deref());
+            }
+            drop(all);
+            let all = t.rows.entries.borrow();
+            let (key, desc) = t.sort.get();
+            search.tree.flatten(&all, key, desc, SHOW_HIDDEN.load(Relaxed))
+        };
+        t.hit_count.set(flat.hits);
+        t.rows.update_search(flat);
+        self.update_status(&t);
+    }
+
+    fn walk_done(&self, id: u64, seq: u64, took: Duration, capped: bool, err: Option<String>) {
+        let Some(t) = self.find(id) else { return };
+        if self.search_seq.load(SeqCst) != seq {
+            return;
+        }
+        let mut note = format!("폴더 검색 {:.1} s", took.as_secs_f64());
+        if capped {
+            note += &format!(" · 처음 {SEARCH_LIMIT}개에서 멈춤");
+        }
+        if let Some(e) = err {
+            note += &format!(" · {e}");
+        }
+        *t.note.borrow_mut() = note;
+        self.update_status(&t);
+        self.sync_fit(&t);
+    }
+
     /// "내용:<text>" searches inside the files under the current folder; hits stream in.
     fn content_search(&self, t: &Rc<Tab>, query: String, text: String) {
         let root = t.cwd.borrow().clone();
+        if is_this_pc(&root) {
+            return self.set_note(t, "폴더에서만 내용을 검색할 수 있음".into());
+        }
         if root.as_os_str().is_empty() {
             return;
         }
         let seq = self.search_seq.fetch_add(1, SeqCst) + 1;
-        // Switch to an empty result list at once; it fills as files match.
+        // Switch to an empty tree at once; it fills as files match.
         t.epoch.fetch_add(1, SeqCst);
         t.pending.take();
         t.bump_sort();
-        t.rows.replace(Vec::new(), Vec::new());
+        let mut entries = Vec::new();
+        let mut tree = SearchTree::default();
+        tree.root_entry(&mut entries, &root, synthetic_folder(&root));
+        t.rows.replace_search(entries, FlatTree::default());
+        t.hit_count.set(0);
         t.cursor.set(None);
         t.anchor.set(None);
-        *t.search.borrow_mut() = Some((query, Vec::new()));
+        *t.search.borrow_mut() = Some(Search { query, scope: Scope::Under(root.clone()), tree });
         *t.note.borrow_mut() = format!("'{}' 아래에서 내용 검색 중…", t.title());
         if self.is_active(t) {
             self.ui().set_search_mode(true);
@@ -1390,7 +2020,7 @@ fn content_worker(id: u64, seq: u64, latest: Arc<AtomicU64>, root: PathBuf, text
     let flush = || {
         let batch = std::mem::take(&mut *pending.lock().unwrap());
         if !batch.is_empty() {
-            let entries = batch.iter().map(|p| hit_entry(&index::Hit { path: p.clone(), dir: false })).collect();
+            let entries = batch.iter().map(|p| file_entry(p, false)).collect();
             post(move |a| a.content_batch(id, seq, batch, entries));
         }
     };
@@ -1424,23 +2054,22 @@ impl App {
         if self.search_seq.load(SeqCst) != seq {
             return;
         }
-        let rows = &t.rows;
-        let (start, n) = {
-            let mut all = rows.entries.borrow_mut();
-            let start = all.len();
-            Arc::make_mut(&mut all).extend(entries);
-            let end = all.len();
-            rows.order.borrow_mut().extend(start as u32..end as u32);
-            rows.selected.borrow_mut().resize(end, false);
-            rows.locations
-                .borrow_mut()
-                .extend(paths.iter().map(|p| p.parent().map(|d| d.display().to_string()).unwrap_or_default()));
-            if let Some((_, hits)) = t.search.borrow_mut().as_mut() {
-                hits.extend(paths);
+        let flat = {
+            let mut search = t.search.borrow_mut();
+            let Some(search) = search.as_mut() else { return };
+            let base = search.scope.root().map(Path::to_path_buf);
+            let mut all = t.rows.entries.borrow_mut();
+            let nodes = Arc::make_mut(&mut all);
+            for (path, entry) in paths.into_iter().zip(entries) {
+                search.tree.insert(nodes, &path, false, Some(entry), base.as_deref());
             }
-            (start, end - start)
+            drop(all);
+            let all = t.rows.entries.borrow();
+            let (key, desc) = t.sort.get();
+            search.tree.flatten(&all, key, desc, SHOW_HIDDEN.load(Relaxed))
         };
-        rows.notify.row_added(start, n);
+        t.hit_count.set(flat.hits);
+        t.rows.update_search(flat);
         self.update_status(&t);
     }
 
@@ -1467,6 +2096,65 @@ impl App {
             self.reload(t, After::default());
         }
         self.sync_view(t);
+    }
+
+    /// The scope combo changed: remember it for this tab and rerun the active search.
+    fn search_scope_changed(&self) {
+        let t = self.tab();
+        let kind = ScopeKind::from_index(self.ui().get_search_scope());
+        if t.search_scope.replace(kind) == kind {
+            return; // picking the current scope again
+        }
+        if let Some(query) = t.query()
+            && content_query(&query).is_none()
+        {
+            self.search_in(&t, query);
+        }
+    }
+
+    /// Expands or collapses one folder row of the search tree.
+    fn toggle_expand(&self, row: usize) {
+        let t = self.tab();
+        let Some(node) = t.rows.entry(row) else { return };
+        let flat = {
+            let mut search = t.search.borrow_mut();
+            let Some(search) = search.as_mut() else { return };
+            if !search.tree.toggle(node) {
+                return;
+            }
+            let all = t.rows.entries.borrow();
+            let (key, desc) = t.sort.get();
+            search.tree.flatten(&all, key, desc, SHOW_HIDDEN.load(Relaxed))
+        };
+        t.hit_count.set(flat.hits);
+        t.rows.apply_flat(flat);
+        self.update_status(&t);
+    }
+
+    /// Left/Right on a search-tree folder row; false lets normal cursor movement happen.
+    fn tree_arrow(&self, t: &Tab, right: bool) -> bool {
+        let Some(row) = self.cursor_row(t) else { return false };
+        let Some(node) = t.rows.entry(row) else { return false };
+        let meta = t.rows.meta.borrow().get(node as usize).copied().unwrap_or_default();
+        if !meta.expandable || meta.expanded == right {
+            return false;
+        }
+        self.toggle_expand(row);
+        true
+    }
+
+    /// "이 폴더에서 검색": search inside `path` and focus the search box.
+    fn search_here(&self, path: PathBuf) {
+        let t = self.tab();
+        if is_this_pc(&path) {
+            return self.set_note(&t, "폴더에서만 검색할 수 있음".into());
+        }
+        t.search_scope.set(ScopeKind::Subtree);
+        self.ui().set_search_scope(ScopeKind::Subtree.index());
+        if !same_path(&t.cwd.borrow(), &path) {
+            self.navigate(&t, path, Hist::Push, None);
+        }
+        self.ui().invoke_focus_search();
     }
 
     /// The first search without the index service asks to install it (UAC).
@@ -1540,7 +2228,7 @@ impl App {
     /// Keeps the shell menu for the selection (or, with nothing selected, the folder) warm.
     fn prefetch_for(&self, t: &Tab) {
         let cwd = t.cwd.borrow().clone();
-        if self.menu_busy.get() || cwd.as_os_str().is_empty() {
+        if self.menu_busy.get() || cwd.as_os_str().is_empty() || is_this_pc(&cwd) {
             return;
         }
         let sel = t.rows.selection();
@@ -1623,6 +2311,15 @@ impl App {
         if self.menu_busy.get() || paths.is_empty() || cwd.as_os_str().is_empty() {
             return;
         }
+        if at_this_pc(&t) {
+            if background {
+                let top = [own(CMD_REFRESH, "새로 고침\tF5")];
+                if popup::show(self.hwnd(), at, &top, &[], &[]) == CMD_REFRESH {
+                    self.reload(&t, After::default());
+                }
+                return;
+            }
+        }
         let seq = self.prefetch(background, paths.clone());
         let shell = seq.as_ref().ok().and_then(|&s| self.host.wait(s, MENU_WAIT));
 
@@ -1633,15 +2330,32 @@ impl App {
                 own(CMD_NEW_FILE, "새 텍스트 문서"),
                 own(CMD_REFRESH, "새로 고침\tF5"),
                 SEP,
+                own(CMD_SEARCH_HERE, "이 폴더에서 검색"),
                 own(CMD_ADD_FAVORITE, "즐겨찾기에 추가"),
+            ]
+        } else if at_this_pc(&t) {
+            vec![
+                Own { default: true, ..own(CMD_OPEN, "열기\tEnter") },
+                own(CMD_OPEN_TAB, "새 탭에서 열기"),
+                own(CMD_SEARCH_HERE, "이 폴더에서 검색"),
+                own(CMD_ADD_FAVORITE, "즐겨찾기에 추가"),
+                SEP,
+                own(CMD_COPY_PATH, "경로 복사\tCtrl+Shift+C"),
             ]
         } else {
             let sel = t.rows.selection();
+            // Parent folders shown for context are not results: no rename/delete on them.
+            let structural = t
+                .search
+                .borrow()
+                .as_ref()
+                .is_some_and(|s| sel.iter().any(|&i| !s.tree.is_hit(i)));
             let mut v = vec![Own { default: true, ..own(CMD_OPEN, "열기\tEnter") }];
             if let [i] = sel[..]
                 && t.rows.is_dir(i)
             {
                 v.push(own(CMD_OPEN_TAB, "새 탭에서 열기"));
+                v.push(own(CMD_SEARCH_HERE, "이 폴더에서 검색"));
                 v.push(own(CMD_ADD_FAVORITE, "즐겨찾기에 추가"));
             }
             v.extend([
@@ -1649,10 +2363,10 @@ impl App {
                 own(CMD_CUT, "잘라내기\tCtrl+X"),
                 own(CMD_COPY, "복사\tCtrl+C"),
                 own(CMD_COPY_PATH, "경로 복사\tCtrl+Shift+C"),
-                SEP,
-                own(CMD_RENAME, "이름 바꾸기\tF2"),
-                own(CMD_DELETE, "삭제\tDel"),
             ]);
+            if !structural {
+                v.extend([SEP, own(CMD_RENAME, "이름 바꾸기\tF2"), own(CMD_DELETE, "삭제\tDel")]);
+            }
             v
         };
         let items: &[MenuItem] = match &shell {
@@ -1690,6 +2404,11 @@ impl App {
             CMD_NEW_FOLDER => self.new_folder(),
             CMD_NEW_FILE => self.new_file(),
             CMD_REFRESH => self.reload(&t, After::default()),
+            CMD_SEARCH_HERE => {
+                if let Some(p) = paths.first() {
+                    self.search_here(p.clone());
+                }
+            }
             CMD_ADD_FAVORITE => {
                 if let Some(p) = paths.first() {
                     self.add_favorite_path(p.clone());
@@ -1757,6 +2476,9 @@ impl App {
         let t = self.tab();
         let mut paths = self.selected_paths(&t);
         if paths.is_empty() {
+            if is_this_pc(&t.cwd.borrow()) {
+                return;
+            }
             paths.push(t.cwd.borrow().clone());
         }
         self.properties_of(paths);
@@ -1793,6 +2515,9 @@ impl App {
 
     fn copy(&self, cut: bool) {
         let t = self.tab();
+        if at_this_pc(&t) {
+            return self.set_note(&t, "내 PC에서는 복사할 수 없음".into());
+        }
         let paths = self.selected_paths(&t);
         if paths.is_empty() {
             return;
@@ -1806,6 +2531,9 @@ impl App {
 
     fn paste(&self) {
         let t = self.tab();
+        if is_this_pc(&t.cwd.borrow()) {
+            return self.set_note(&t, "내 PC에는 붙여넣을 수 없음".into());
+        }
         // ponytail: reads the clipboard on the UI thread; an app that renders its clipboard
         // data lazily could stall this. Move to a worker if that shows up.
         let Some((src, cut)) = shell::clipboard_get(self.hwnd()) else {
@@ -1823,8 +2551,25 @@ impl App {
         });
     }
 
+    /// Search results show parent folders for context; those rows must not be deleted or renamed.
+    fn includes_tree_container(&self, t: &Tab) -> bool {
+        let search = t.search.borrow();
+        let Some(search) = search.as_ref() else { return false };
+        let mut sel = t.rows.selection();
+        if sel.is_empty() {
+            sel.extend(t.cursor.get());
+        }
+        sel.into_iter().any(|i| !search.tree.is_hit(i))
+    }
+
     fn delete(&self, permanent: bool) {
         let t = self.tab();
+        if at_this_pc(&t) {
+            return self.set_note(&t, "내 PC에서는 삭제할 수 없음".into());
+        }
+        if self.includes_tree_container(&t) {
+            return self.set_note(&t, "폴더 구조 행은 삭제할 수 없음".into());
+        }
         let paths = self.selected_paths(&t);
         if !paths.is_empty() {
             // The shell asks for confirmation itself on a permanent delete, like Explorer.
@@ -1834,6 +2579,12 @@ impl App {
 
     fn start_rename(&self) {
         let t = self.tab();
+        if at_this_pc(&t) {
+            return self.set_note(&t, "내 PC에서는 이름을 바꿀 수 없음".into());
+        }
+        if self.includes_tree_container(&t) {
+            return self.set_note(&t, "폴더 구조 행은 이름을 바꿀 수 없음".into());
+        }
         let Some(c) = t.cursor.get().or_else(|| t.rows.selection().first().copied()) else { return };
         t.rows.select_only(Some(c));
         t.rows.editing.set(Some(c));
@@ -1870,6 +2621,9 @@ impl App {
     /// Creates the item on a worker, then selects it with its name ready to edit.
     fn new_item(&self, create: fn(&std::path::Path) -> io::Result<String>) {
         let t = self.tab();
+        if at_this_pc(&t) {
+            return self.set_note(&t, "내 PC에서는 새로 만들 수 없음".into());
+        }
         if t.search.borrow().is_some() {
             return self.set_note(&t, "검색 결과에서는 새로 만들 수 없음".into());
         }
@@ -1951,6 +2705,9 @@ impl App {
             return Some((t.path_of(i), Some(row as usize)));
         }
         let cwd = t.cwd.borrow().clone();
+        if is_this_pc(&cwd) {
+            return None; // dropping onto a drive/folder row was handled above
+        }
         (!cwd.as_os_str().is_empty()).then_some((cwd, None))
     }
 
@@ -1963,6 +2720,9 @@ impl App {
 
     /// Runs a native drop on a worker (it can show progress/conflict dialogs), then refreshes.
     fn drop_files(&self, files: Vec<PathBuf>, target: PathBuf, move_: bool) {
+        if is_this_pc(&target) {
+            return;
+        }
         let t = self.tab();
         let id = t.id;
         let hwnd = self.hwnd();
@@ -2025,6 +2785,180 @@ fn kind_of(e: &Entry) -> String {
     }
 }
 
+/// "내 PC": keep user folders above drives while preserving the chosen column order within
+/// each group. `kinds` is aligned with the entries; user folders are listed first.
+fn group_this_pc_order(order: &mut [u32], kinds: &[String]) {
+    order.sort_by_key(|&i| {
+        u8::from(!matches!(kinds.get(i as usize).map(String::as_str), Some("파일 폴더")))
+    });
+}
+
+/// Explorer-like capacity for drives: "236 GB", "1.81 TB", "512 MB".
+fn format_capacity(bytes: u64) -> String {
+    const UNITS: [(&str, u64); 4] = [("TB", 1 << 40), ("GB", 1 << 30), ("MB", 1 << 20), ("KB", 1 << 10)];
+    for (unit, size) in UNITS {
+        if bytes >= size {
+            let value = bytes as f64 / size as f64;
+            let text = if value >= 100.0 {
+                format!("{value:.0}")
+            } else if value >= 10.0 {
+                format!("{value:.1}")
+            } else {
+                format!("{value:.2}")
+            };
+            return format!("{text} {unit}");
+        }
+    }
+    "0 KB".to_string()
+}
+
+fn build_this_pc_rows(drives: &[shell::Drive]) -> Vec<ThisPcRow> {
+    let mut rows: Vec<ThisPcRow> = shell::user_folders()
+        .into_iter()
+        .map(|(title, path)| ThisPcRow {
+            title,
+            path,
+            kind: "파일 폴더".to_string(),
+            date: String::new(),
+            size: String::new(),
+            usage: -1.0,
+            free: 0,
+            total: 0,
+        })
+        .collect();
+    for drive in drives {
+        let (date, size, usage, free, total) = match shell::drive_space(&drive.path) {
+            Some((free, total)) => {
+                let usage = (total.saturating_sub(free)) as f32 / total as f32;
+                (format!("{} 남음", format_capacity(free)), format_capacity(total), usage, free, total)
+            }
+            None => ("사용할 수 없음".to_string(), String::new(), -1.0, 0, 0),
+        };
+        rows.push(ThisPcRow {
+            title: drive.title.clone(),
+            path: drive.path.clone(),
+            kind: drive.kind.to_string(),
+            date,
+            size,
+            usage,
+            free,
+            total,
+        });
+    }
+    rows
+}
+
+/// Path completion for the address bar: "내 PC", drive roots, then matching folders/files
+/// under the typed parent. Runs on a worker.
+fn suggest_paths(input: &str, cwd: &Path) -> Vec<Suggest> {
+    const LIMIT: usize = 8;
+    let raw = input.trim().trim_matches('"');
+    if raw.is_empty() {
+        return Vec::new();
+    }
+    let expanded = expand_env(raw);
+    let text = expanded.as_str();
+    let lower = text.to_lowercase();
+    let mut out: Vec<Suggest> = Vec::new();
+    if "내 pc".starts_with(&lower) || "this pc".starts_with(&lower) || THIS_PC.to_lowercase().starts_with(&lower) {
+        out.push(Suggest { name: "내 PC".into(), detail: "드라이브와 폴더".into(), path: THIS_PC.into() });
+    }
+    // "C" / "C:" autocompletes to the drive root.
+    if !text.contains('\\') && !text.contains('/') {
+        let typed = text.to_lowercase();
+        for drive in shell::drives() {
+            let root = drive.path.display().to_string();
+            if root.to_lowercase().starts_with(&typed) {
+                out.push(Suggest { name: drive.title.into(), detail: root.clone().into(), path: root.into() });
+            }
+        }
+    }
+    let (parent, prefix) = split_for_suggest(text, cwd);
+    let prefix = prefix.to_lowercase();
+    let (mut dirs, mut files) = (Vec::new(), Vec::new());
+    if let Ok(entries) = std::fs::read_dir(&parent) {
+        for entry in entries.flatten() {
+            let name = entry.file_name().to_string_lossy().into_owned();
+            if !name.to_lowercase().starts_with(&prefix) {
+                continue;
+            }
+            let is_dir = entry.file_type().map(|t| t.is_dir()).unwrap_or(false);
+            let path = entry.path().display().to_string();
+            let item = Suggest {
+                name: name.into(),
+                detail: if is_dir {
+                    parent.display().to_string()
+                } else {
+                    format!("{} · 파일", parent.display())
+                }
+                .into(),
+                path: path.into(),
+            };
+            if is_dir {
+                dirs.push(item);
+            } else {
+                files.push(item);
+            }
+            if dirs.len() + files.len() >= 400 {
+                break; // keep a pathological folder from dominating the request
+            }
+        }
+    }
+    dirs.sort_by(|a, b| a.name.to_lowercase().cmp(&b.name.to_lowercase()));
+    files.sort_by(|a, b| a.name.to_lowercase().cmp(&b.name.to_lowercase()));
+    out.extend(dirs);
+    out.extend(files);
+    let mut seen = HashSet::new();
+    out.retain(|s| seen.insert(s.path.to_lowercase()));
+    out.truncate(LIMIT);
+    out
+}
+
+/// Splits typed text into (folder to list, name prefix). A trailing separator lists the
+/// folder itself; a bare relative name is resolved against `cwd`.
+fn split_for_suggest(text: &str, cwd: &Path) -> (PathBuf, String) {
+    if text.ends_with('\\') || text.ends_with('/') {
+        return (PathBuf::from(text), String::new());
+    }
+    if text.len() == 2 && text.ends_with(':') {
+        return (PathBuf::from(format!("{text}\\")), String::new());
+    }
+    let path = Path::new(text);
+    match (path.parent(), path.file_name()) {
+        (Some(parent), Some(name)) if !parent.as_os_str().is_empty() => {
+            (parent.to_path_buf(), name.to_string_lossy().into_owned())
+        }
+        (Some(parent), _) if !parent.as_os_str().is_empty() => (parent.to_path_buf(), String::new()),
+        _ => (cwd.to_path_buf(), text.to_string()),
+    }
+}
+
+/// Expands %VARIABLE% references; unknown names stay as typed.
+fn expand_env(text: &str) -> String {
+    let mut out = String::with_capacity(text.len());
+    let mut rest = text;
+    while let Some(start) = rest.find('%') {
+        out.push_str(&rest[..start]);
+        let after = &rest[start + 1..];
+        let Some(end) = after.find('%') else {
+            out.push_str(&rest[start..]);
+            return out;
+        };
+        let name = &after[..end];
+        match std::env::var(name) {
+            Ok(value) => out.push_str(&value),
+            Err(_) => {
+                out.push('%');
+                out.push_str(name);
+                out.push('%');
+            }
+        }
+        rest = &after[end + 1..];
+    }
+    out.push_str(rest);
+    out
+}
+
 /// Sorted display order, without hidden items unless "숨긴 항목" is on.
 fn display_order(entries: &[Entry], key: SortKey, desc: bool) -> Vec<u32> {
     let mut order = sort_order(entries, key, desc);
@@ -2045,14 +2979,18 @@ struct FitSamples {
 fn fit_samples(t: &Tab) -> FitSamples {
     let entries = t.rows.entries.borrow();
     let locations = t.rows.locations.borrow();
+    let kinds = t.rows.kinds.borrow();
+    let dates = t.rows.dates.borrow();
+    let sizes = t.rows.sizes.borrow();
     let searching = t.search.borrow().is_some();
+    let this_pc = is_this_pc(&t.cwd.borrow()) && !searching;
     let mut name = "이름".to_string();
     let mut location = "위치".to_string();
-    let mut date = "수정한 날짜".to_string();
+    let mut date = if this_pc { "여유 공간".to_string() } else { "수정한 날짜".to_string() };
     let mut kind = "유형".to_string();
-    let mut size = "크기".to_string();
+    let mut size = if this_pc { "전체 용량".to_string() } else { "크기".to_string() };
     let (mut name_w, mut location_w) = (text_units(&name), text_units(&location));
-    let (mut kind_w, size_w) = (text_units(&kind), text_units(&size));
+    let (mut kind_w, mut size_w, mut date_w) = (text_units(&kind), text_units(&size), text_units(&date));
     let mut has_date = false;
     let mut max_size = None;
     for (i, e) in entries.iter().enumerate() {
@@ -2074,18 +3012,38 @@ fn fit_samples(t: &Tab) -> FitSamples {
                 location = l.clone();
             }
         }
-        let k = kind_of(e);
+        let k = match kinds.get(i).filter(|s| !s.is_empty()) {
+            Some(s) => s.clone(),
+            None => kind_of(e),
+        };
         let w = text_units(&k);
         if w > kind_w {
             kind_w = w;
             kind = k;
         }
-        has_date |= e.modified > 0;
-        if !e.is_dir() {
-            max_size = Some(max_size.map_or(e.size, |m: u64| m.max(e.size)));
+        match dates.get(i).filter(|s| !s.is_empty()) {
+            Some(d) => {
+                let w = text_units(d);
+                if w > date_w {
+                    date_w = w;
+                    date = d.clone();
+                }
+            }
+            None => has_date |= e.modified > 0,
+        }
+        match sizes.get(i).filter(|s| !s.is_empty()) {
+            Some(s) => {
+                let w = text_units(s);
+                if w > size_w {
+                    size_w = w;
+                    size = s.clone();
+                }
+            }
+            None if !e.is_dir() => max_size = Some(max_size.map_or(e.size, |m: u64| m.max(e.size))),
+            None => {}
         }
     }
-    if has_date && text_units("0000-00-00 00:00") > text_units(&date) {
+    if has_date && text_units("0000-00-00 00:00") > date_w {
         date = "0000-00-00 00:00".into();
     }
     if let Some(bytes) = max_size {
@@ -2156,13 +3114,64 @@ fn start_icon_worker() {
 }
 
 /// A search hit as a list entry, with size/date/attributes read from the file system.
-fn hit_entry(h: &index::Hit) -> Entry {
-    use std::os::windows::fs::MetadataExt;
-    let name = h.path.file_name().unwrap_or(h.path.as_os_str());
-    match std::fs::symlink_metadata(&h.path) {
-        Ok(m) => Entry::new(name, m.file_size(), m.last_write_time() as i64, m.file_attributes()),
-        Err(_) => Entry::new(name, 0, 0, if h.dir { 0x10 } else { 0 }), // gone since it was indexed
+/// Builds the search tree for index hits. A node index is also its entry index.
+fn tree_from_hits(hits: &[index::Hit], scope: &Scope) -> (Vec<Entry>, SearchTree) {
+    let mut entries = Vec::new();
+    let mut tree = SearchTree::default();
+    let base = scope.root();
+    for h in hits {
+        tree.insert(&mut entries, &h.path, h.dir, Some(file_entry(&h.path, h.dir)), base);
     }
+    (entries, tree)
+}
+
+/// Walks a folder for matching names, streaming hits to the tab in batches.
+fn walk_search_worker(id: u64, seq: u64, latest: Arc<AtomicU64>, root: PathBuf, query: String, pattern: Pattern) {
+    use std::sync::Mutex;
+    use std::sync::atomic::{AtomicBool, AtomicUsize};
+    let start = Instant::now();
+    if !root.is_dir() {
+        let note = format!("폴더를 찾을 수 없음: {}", root.display());
+        post(move |a| {
+            if let Some(t) = a.find(id) {
+                a.set_note(&t, note);
+            }
+        });
+        return;
+    }
+    let (q, r) = (query.clone(), root.clone());
+    let root_entry = file_entry(&root, true);
+    post(move |a| a.walk_begin(id, seq, q, r, root_entry));
+    let pending = Mutex::new(Vec::<(PathBuf, bool)>::new());
+    let (count, done) = (AtomicUsize::new(0), AtomicBool::new(false));
+    let flush = || {
+        let batch = std::mem::take(&mut *pending.lock().unwrap());
+        if !batch.is_empty() {
+            let entries = batch.iter().map(|(p, dir)| file_entry(p, *dir)).collect();
+            post(move |a| a.name_batch(id, seq, batch, entries));
+        }
+    };
+    let r = thread::scope(|s| {
+        // Show hits within ~0.1 s even when they are sparse.
+        s.spawn(|| {
+            while !done.load(SeqCst) {
+                thread::sleep(Duration::from_millis(100));
+                flush();
+            }
+        });
+        let r = search::walk_names(&root, &pattern, |path, dir| {
+            if latest.load(SeqCst) != seq {
+                return false;
+            }
+            pending.lock().unwrap().push((path, dir));
+            count.fetch_add(1, SeqCst) + 1 < SEARCH_LIMIT
+        });
+        done.store(true, SeqCst);
+        r
+    });
+    flush();
+    let (took, capped) = (start.elapsed(), count.load(SeqCst) >= SEARCH_LIMIT);
+    post(move |a| a.walk_done(id, seq, took, capped, r.err()));
 }
 
 fn cursor_pos() -> (i32, i32) {
@@ -2181,6 +3190,9 @@ fn same_path(a: &Path, b: &Path) -> bool {
 
 /// Folder buttons for the address bar, from the drive down to `path`.
 fn crumbs_for(path: &Path) -> Vec<Crumb> {
+    if is_this_pc(path) {
+        return vec![Crumb { title: "내 PC".into(), path: THIS_PC.into() }];
+    }
     let mut ancestors: Vec<&Path> = path.ancestors().collect();
     ancestors.reverse();
     ancestors
@@ -2308,6 +3320,9 @@ unsafe extern "system" fn history_subclass(
     if msg == WM_SIZE && FRAME_MAXIMIZED.load(Relaxed) != unsafe { IsZoomed(hwnd) }.as_bool() {
         apply_window_frame(hwnd);
     }
+    if msg == WM_DEVICECHANGE {
+        post(|a| a.devices_changed());
+    }
     if msg == WM_XBUTTONDOWN {
         let button = ((wparam.0 >> 16) & 0xffff) as u16;
         if button == XBUTTON1 || button == XBUTTON2 {
@@ -2419,6 +3434,7 @@ fn main() -> Result<(), slint::PlatformError> {
     SHOW_EXT.store(show_ext, Relaxed);
     ui.set_show_hidden(show_hidden);
     ui.set_show_ext(show_ext);
+    ui.set_this_pc_path(THIS_PC.into());
     start_icon_worker();
 
     let desktop = shell::desktop().ok();
@@ -2443,7 +3459,9 @@ fn main() -> Result<(), slint::PlatformError> {
             favorites: RefCell::new(favorites),
             desktop,
             downloads,
-            drives,
+            drives: RefCell::new(drives),
+            devices_due: Cell::new(false),
+            suggest_seq: Arc::default(),
             drag_armed: Cell::new(false),
             pending_collapse: Cell::new(None),
             rubber_base: RefCell::default(),
@@ -2463,6 +3481,8 @@ fn main() -> Result<(), slint::PlatformError> {
 
     ui.on_navigate(|t| app(|a| a.address(&t)));
     ui.on_search(|t| app(|a| a.search(&t)));
+    ui.on_search_scope_changed(|| app(|a| a.search_scope_changed()));
+    ui.on_row_expand(|r| app(|a| a.toggle_expand(r as usize)));
     ui.on_back(|| app(|a| a.back()));
     ui.on_forward(|| app(|a| a.forward()));
     ui.on_up(|| app(|a| a.up()));
@@ -2504,12 +3524,15 @@ fn main() -> Result<(), slint::PlatformError> {
         a.delete(false);
     }));
     ui.on_view_changed(|| app(|a| a.view_changed()));
+    ui.on_suggest(|t| app(|a| a.suggest(&t)));
+    ui.on_suggest_cancel(|| app(|a| a.cancel_suggest()));
     ui.on_key(|e, in_list| {
         app(|a| a.key(&e.text, e.modifiers.control, e.modifiers.shift, e.modifiers.alt, in_list))
     });
 
     let start = std::env::args().nth(1).unwrap_or_else(|| r"C:\".into());
-    app(|a| a.new_tab(PathBuf::from(start)));
+    let start = if is_this_pc_name(&start) { PathBuf::from(THIS_PC) } else { PathBuf::from(start) };
+    app(|a| a.new_tab(start));
     ui.run()
 }
 
@@ -2530,5 +3553,82 @@ mod tests {
         let paths: Vec<String> = crumbs.iter().map(|c| c.path.to_string()).collect();
         assert_eq!(titles, ["C:", "Users", "hp", "source"]);
         assert_eq!(paths, [r"C:\", r"C:\Users", r"C:\Users\hp", r"C:\Users\hp\source"]);
+    }
+
+    #[test]
+    fn this_pc_names_and_crumbs() {
+        for name in ["내 PC", "내PC", "this pc", "THIS PC", super::THIS_PC] {
+            assert!(super::is_this_pc_name(name), "{name}");
+        }
+        assert!(!super::is_this_pc_name(r"C:\"));
+        assert!(!super::is_this_pc_name("내 PCX"));
+
+        let crumbs = super::crumbs_for(std::path::Path::new(super::THIS_PC));
+        assert_eq!(crumbs.len(), 1);
+        assert_eq!(crumbs[0].title, "내 PC");
+        assert_eq!(crumbs[0].path, super::THIS_PC);
+    }
+
+    #[test]
+    fn capacity_strings() {
+        assert_eq!(super::format_capacity(0), "0 KB");
+        assert_eq!(super::format_capacity(512 << 20), "512 MB");
+        assert_eq!(super::format_capacity(1 << 30), "1.00 GB");
+        assert_eq!(super::format_capacity(100 << 30), "100 GB");
+        assert_eq!(super::format_capacity(1 << 40), "1.00 TB");
+    }
+
+    #[test]
+    fn groups_folders_before_drives() {
+        let kinds: Vec<String> = ["파일 폴더", "로컬 디스크", "파일 폴더", "이동식 디스크"]
+            .iter()
+            .map(|k| k.to_string())
+            .collect();
+        let mut order = vec![1, 3, 0, 2];
+        super::group_this_pc_order(&mut order, &kinds);
+        assert_eq!(order, [0, 2, 1, 3]); // the order inside each group is preserved
+    }
+
+    #[test]
+    fn splits_suggestion_input() {
+        let cwd = std::path::Path::new(r"C:\Users\hp");
+        assert_eq!(
+            super::split_for_suggest(r"C:\Win", cwd),
+            (std::path::PathBuf::from(r"C:\"), "Win".to_string())
+        );
+        assert_eq!(
+            super::split_for_suggest(r"C:\Windows\", cwd),
+            (std::path::PathBuf::from(r"C:\Windows\"), String::new())
+        );
+        assert_eq!(
+            super::split_for_suggest("Doc", cwd),
+            (std::path::PathBuf::from(cwd), "Doc".to_string())
+        );
+        assert_eq!(
+            super::split_for_suggest("C:", cwd),
+            (std::path::PathBuf::from(r"C:\"), String::new())
+        );
+    }
+
+    #[test]
+    fn suggests_children_and_expands_environment() {
+        let dir = std::env::temp_dir().join(format!("fex-suggest-{}", std::process::id()));
+        std::fs::create_dir_all(dir.join("alpha")).unwrap();
+        std::fs::write(dir.join("alpine.txt"), "x").unwrap();
+        std::fs::create_dir_all(dir.join("beta")).unwrap();
+
+        let typed = format!(r"{}\al", dir.display());
+        let items = super::suggest_paths(&typed, std::path::Path::new(r"C:\"));
+        let names: Vec<String> = items.iter().map(|s| s.name.to_string()).collect();
+        assert!(names.contains(&"alpha".to_string()), "{names:?}");
+        assert!(names.contains(&"alpine.txt".to_string()), "{names:?}");
+        assert!(!names.contains(&"beta".to_string()), "{names:?}");
+
+        std::fs::remove_dir_all(&dir).unwrap();
+        if let Ok(temp) = std::env::var("TEMP") {
+            assert_eq!(super::expand_env(r"%TEMP%\x"), format!(r"{temp}\x"));
+        }
+        assert_eq!(super::expand_env("%NO_SUCH_VAR_FEX%"), "%NO_SUCH_VAR_FEX%");
+        assert_eq!(super::expand_env("100%"), "100%");
     }
 }

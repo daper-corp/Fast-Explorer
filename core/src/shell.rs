@@ -9,7 +9,7 @@ use std::path::{Path, PathBuf};
 use windows::Win32::Foundation::{ERROR_ACCESS_DENIED, ERROR_SUCCESS, HANDLE, HGLOBAL, HWND, POINT};
 use windows::Win32::System::Registry::{HKEY_CURRENT_USER, RRF_RT_REG_DWORD, RegGetValueW};
 use windows::Win32::Storage::FileSystem::{
-    GetDriveTypeW, GetLogicalDriveStringsW, GetVolumeInformationW, MOVE_FILE_FLAGS, MoveFileExW,
+    GetDiskFreeSpaceExW, GetDriveTypeW, GetLogicalDriveStringsW, GetVolumeInformationW, MOVE_FILE_FLAGS, MoveFileExW,
 };
 use windows::Win32::System::Com::{
     CLSCTX_ALL, COINIT_APARTMENTTHREADED, COINIT_DISABLE_OLE1DDE, CoCreateInstance, CoInitializeEx, CoTaskMemFree,
@@ -25,9 +25,10 @@ use windows::Win32::System::DataExchange::{
 use windows::Win32::System::Memory::{GMEM_MOVEABLE, GlobalAlloc, GlobalLock, GlobalUnlock};
 use windows::Win32::System::Ole::{CF_HDROP, CF_UNICODETEXT};
 use windows::Win32::UI::Shell::{
-    DROPFILES, DragQueryFileW, FOF_ALLOWUNDO, FOLDERID_Desktop, FOLDERID_Downloads, FOLDERID_ProgramFiles,
-    FOLDERID_RoamingAppData, KF_FLAG_DEFAULT, SHGetKnownFolderPath, FOF_NO_UI, FOF_NOCONFIRMMKDIR,
-    FOF_RENAMEONCOLLISION, FOFX_ADDUNDORECORD, FileOperation, HDROP, IFileOperation, IShellItem, SEE_MASK_NOASYNC,
+    DROPFILES, DragQueryFileW, FOF_ALLOWUNDO, FOLDERID_Desktop, FOLDERID_Documents, FOLDERID_Downloads,
+    FOLDERID_Music, FOLDERID_Pictures, FOLDERID_ProgramFiles, FOLDERID_RoamingAppData, FOLDERID_Videos,
+    KF_FLAG_DEFAULT, SHGetKnownFolderPath, FOF_NO_UI, FOF_NOCONFIRMMKDIR, FOF_RENAMEONCOLLISION,
+    FOFX_ADDUNDORECORD, FileOperation, HDROP, IFileOperation, IShellItem, SEE_MASK_NOASYNC,
     SEE_MASK_NOCLOSEPROCESS, SHCreateItemFromParsingName, SHELLEXECUTEINFOW, ShellExecuteExW,
 };
 use windows::Win32::System::Threading::{GetExitCodeProcess, INFINITE, WaitForSingleObject};
@@ -132,12 +133,40 @@ pub fn roaming_appdata() -> io::Result<PathBuf> {
     known_folder(&FOLDERID_RoamingAppData)
 }
 
+/// The user folders Explorer lists under "내 PC", in display order.
+pub fn user_folders() -> Vec<(String, PathBuf)> {
+    [
+        ("바탕 화면", &FOLDERID_Desktop),
+        ("다운로드", &FOLDERID_Downloads),
+        ("문서", &FOLDERID_Documents),
+        ("사진", &FOLDERID_Pictures),
+        ("음악", &FOLDERID_Music),
+        ("비디오", &FOLDERID_Videos),
+    ]
+    .into_iter()
+    .filter_map(|(name, id)| known_folder(id).ok().map(|path| (name.to_string(), path)))
+    .collect()
+}
+
 /// One entry under "내 PC".
 pub struct Drive {
     /// Root including the trailing backslash, e.g. `C:\`.
     pub path: PathBuf,
     /// Volume label with the letter, e.g. `로컬 디스크 (C:)`.
     pub title: String,
+    /// Explorer's drive type name, e.g. `로컬 디스크` or `네트워크 드라이브`.
+    pub kind: &'static str,
+}
+
+/// Free bytes available to this user and total bytes. `None` when the volume is not ready
+/// (an empty optical drive, a disconnected network share, ...).
+pub fn drive_space(path: &Path) -> Option<(u64, u64)> {
+    let wide: Vec<u16> = path.as_os_str().encode_wide().chain(Some(0)).collect();
+    let (mut free, mut total) = (0u64, 0u64);
+    unsafe { GetDiskFreeSpaceExW(PCWSTR(wide.as_ptr()), Some(&mut free), Some(&mut total), None) }
+        .ok()
+        .filter(|()| total > 0)
+        .map(|()| (free, total))
 }
 
 /// Every mounted drive that has a root, in the order Windows reports them.
@@ -182,7 +211,7 @@ pub fn drives() -> Vec<Drive> {
             Some(l) => format!("{l} ({letter})"),
             None => format!("{kind_name} ({letter})"),
         };
-        out.push(Drive { path: PathBuf::from(root), title });
+        out.push(Drive { path: PathBuf::from(root), title, kind: kind_name });
     }
     out
 }
@@ -448,7 +477,10 @@ mod tests {
     fn lists_drives() {
         let drives = drives();
         assert!(!drives.is_empty());
-        assert!(drives.iter().all(|d| d.path.is_absolute() && !d.title.is_empty()));
+        assert!(drives.iter().all(|d| d.path.is_absolute() && !d.title.is_empty() && !d.kind.is_empty()));
         assert!(drives.iter().any(|d| d.path.to_string_lossy().starts_with('C')));
+        let fixed = drives.iter().find(|d| d.kind == "로컬 디스크").expect("a local disk");
+        let (free, total) = drive_space(&fixed.path).expect("space of a local disk");
+        assert!(free <= total && total > 0);
     }
 }
