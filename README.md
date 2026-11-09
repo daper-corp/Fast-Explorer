@@ -36,6 +36,8 @@ Fast Explorer는 Windows용 파일 탐색기입니다. 큰 폴더를 빠르게 �
 - OLE 드래그 앤 드롭: 선택 항목을 다른 앱으로 끌어다 놓고, 파일을 목록이나 폴더 행에 떨어뜨릴 수 있습니다.
 - 셸 확장 컨텍스트 메뉴는 별도 프로세스(`fex-shell-host`)에서 만들고 실행합니다. 확장이 멈추거나 죽어도 메인 창은 살아 있고, 10초 넘게 응답이 없으면 호스트를 교체합니다. 셸 메뉴가 준비되지 않았으면 "더 많은 옵션…"으로 나중에 띄울 수 있습니다.
 - 셸 아이콘은 워커 스레드에서 읽으며, 실행 파일·바로 가기처럼 파일 자체의 아이콘이 필요한 형식도 지원합니다.
+- 여러 이름 바꾸기(`Shift+F2`): 찾아 바꾸기(정규식, 대/소문자, 이름/확장자 선택, `{n}` 번호 매기기)를 미리 보며 적용하고 `Ctrl+Z`로 되돌립니다. PowerToys의 PowerRename에 해당합니다.
+- 사용 중인 프로세스 찾기(우클릭): 선택한 파일/폴더 안의 파일을 잡고 있는 프로세스를 Restart Manager로 찾아 종료할 수 있습니다. PowerToys의 File Locksmith에 해당하며, 폴더를 작업 디렉터리로만 쓰는 프로세스는 찾지 못합니다.
 - 새 폴더(`Ctrl+Shift+N`), 새 텍스트 문서, 속성(`Alt+Enter`), 경로 복사(`Ctrl+Shift+C`)를 제공합니다.
 
 ### 창과 뷰
@@ -59,6 +61,7 @@ Fast Explorer는 Windows용 파일 탐색기입니다. 큰 폴더를 빠르게 �
 | `Enter` | 열기 |
 | `Alt+Enter` | 속성 |
 | `F2` | 이름 바꾸기 |
+| `Shift+F2` | 여러 이름 바꾸기 (선택 항목 일괄) |
 | `Delete` / `Shift+Delete` | 휴지통으로 삭제 / 영구 삭제 |
 | `Ctrl+C` / `Ctrl+X` / `Ctrl+V` | 복사 / 잘라내기 / 붙여넣기 |
 | `Ctrl+Shift+C` | 경로 복사 |
@@ -97,6 +100,24 @@ cargo build --release
 - `fex-index.exe` — 인덱스 서비스 (설치용)
 
 배포할 때는 세 실행 파일을 같은 폴더에 두세요. `fex.exe`는 옆에서 `fex-shell-host.exe`를 찾아 실행하고, 인덱스 서비스 설치도 같은 폴더의 `fex-index.exe`를 사용합니다.
+
+## 설치 파일
+
+```powershell
+.\installer\build.ps1   # 릴리스 빌드 후 target\installer\FastExplorer-Setup-<버전>.exe 생성 (Inno Setup 6 필요)
+```
+
+- `%ProgramFiles%\Fast Explorer`에 설치하며 관리자 권한이 필요합니다(인덱스 서비스 보안 조건).
+- 설치 옵션: 바탕 화면 바로 가기, 인덱스 서비스(기본 켜짐), **기본 파일 탐색기로 사용**(기본 꺼짐).
+- 기본 탐색기로 사용하면 폴더·드라이브를 여는 기본 동작이 Fast Explorer로 바뀝니다. Win+E와 작업 표시줄의 탐색기 아이콘은 계속 Explorer를 엽니다. 제거하면 원래대로 돌아갑니다.
+- 제거하면 인덱스 서비스도 함께 제거됩니다.
+
+## 배포와 업데이트
+
+- 워크스페이스 `Cargo.toml`의 `version`이 유일한 버전입니다. 올린 뒤 같은 이름의 태그(`v0.2.0`)를 push하면 `.github/workflows/release.yml`이 설치 파일과 `latest.json`을 GitHub 릴리스로 올립니다.
+- 앱은 하루 한 번 백그라운드에서 `releases/latest/download/latest.json`을 확인하고, 새 버전이 있으면 설치할지 묻습니다. 동의하면 설치 파일을 받아 실행하고 앱을 닫습니다. 묻지 않고 설치하지 않습니다.
+- 빈 공간이나 내 PC에서 우클릭 → "업데이트 확인…"으로 직접 확인할 수 있습니다.
+- 업데이트 확인은 저장소가 public이어야 동작합니다. 코드 서명이 아직 없어 설치 시 SmartScreen 경고가 뜹니다.
 
 ## 실행
 
@@ -144,6 +165,7 @@ cargo test -p fex-index --test live -- --ignored
 
 - `favorites.txt` — 즐겨찾기 폴더 목록 (한 줄에 하나)
 - `view.txt` — 숨김 항목/확장자 표시 설정
+- `update.txt` — 마지막 업데이트 확인 시각. `auto=0` 줄이 있으면 자동 확인을 끔
 
 ## 라이선스
 

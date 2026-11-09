@@ -38,7 +38,7 @@ use windows::Win32::UI::Shell::PropertiesSystem::PSGetPropertyKeyFromName;
 use windows::Win32::System::Variant::{VARIANT, VT_BSTR, VariantClear};
 use windows::Win32::System::Threading::{GetExitCodeProcess, INFINITE, WaitForSingleObject};
 use windows::Win32::UI::WindowsAndMessaging::{
-    CreatePopupMenu, DestroyMenu, GetMenuItemCount, GetMenuItemID, IDYES, MB_ICONQUESTION, MB_YESNO, MessageBoxW,
+    CreatePopupMenu, DestroyMenu, GetMenuItemCount, GetMenuItemID, IDYES, MB_ICONERROR, MB_ICONQUESTION, MB_OK, MB_YESNO, MessageBoxW,
     SW_HIDE, SW_SHOWNORMAL,
 };
 use windows::Win32::Foundation::PROPERTYKEY;
@@ -419,6 +419,11 @@ pub fn install_dir() -> io::Result<PathBuf> {
 pub fn confirm(owner: isize, text: &str) -> bool {
     let r = unsafe { MessageBoxW(Some(HWND(owner as _)), &HSTRING::from(text), w!("Fast Explorer"), MB_YESNO | MB_ICONQUESTION) };
     r == IDYES
+}
+
+/// Error box with an OK button. Blocks, so call it off the UI thread.
+pub fn alert(owner: isize, text: &str) {
+    unsafe { MessageBoxW(Some(HWND(owner as _)), &HSTRING::from(text), w!("Fast Explorer"), MB_OK | MB_ICONERROR) };
 }
 
 /// Runs `exe args` as administrator (UAC prompt) and waits; returns its exit code.

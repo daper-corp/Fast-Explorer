@@ -335,7 +335,10 @@ fn install() -> Res<()> {
     let dir = install_dir()?;
     std::fs::create_dir_all(&dir)?;
     let exe = dir.join("fex-index.exe");
-    std::fs::copy(std::env::current_exe()?, &exe)?;
+    let me = std::env::current_exe()?;
+    if std::fs::canonicalize(&me).ok() != std::fs::canonicalize(&exe).ok() {
+        std::fs::copy(me, &exe)?; // the installer already placed it here
+    }
 
     let info = ServiceInfo {
         name: SERVICE_NAME.into(),

@@ -1,4 +1,4 @@
-import { LineEdit, CheckBox, ListView, ScrollView, Palette } from "std-widgets.slint";
+import { LineEdit, CheckBox, ListView, ScrollView, Palette, Button } from "std-widgets.slint";
 
 export struct Row {
     name: string,
@@ -205,6 +205,35 @@ component KebabButton inherits Rectangle {
     }
 }
 
+// The settings (gear) button, drawn with the Windows icon font like our native menus.
+component GearButton inherits Rectangle {
+    callback clicked;
+
+    horizontal-stretch: 0;
+    width: 30px;
+    height: 30px;
+    border-radius: 6px;
+    background: touch.has-hover ? Palette.foreground.transparentize(0.9) : transparent;
+
+    Text {
+        text: "\u{E713}";
+        font-family: "Segoe MDL2 Assets";
+        font-size: 15px;
+        color: Palette.foreground;
+        horizontal-alignment: center;
+        vertical-alignment: center;
+    }
+
+    touch := TouchArea {
+        width: 100%;
+        height: 100%;
+        mouse-cursor: pointer;
+        clicked => {
+            root.clicked();
+        }
+    }
+}
+
 // A radio-like row used inside the search-options menu (no nested popup needed).
 component OptionChoice inherits Rectangle {
     in property <string> text;
@@ -252,40 +281,6 @@ component OptionChoice inherits Rectangle {
     }
 }
 
-// A flat toolbar button: no border or fill until hovered.
-component ToolButton inherits Rectangle {
-    in property <string> text;
-    in property <length> font-size: 13px;
-    in property <bool> enabled: true;
-    callback clicked;
-
-    horizontal-stretch: 0;
-    min-width: max(30px, layout.min-width);
-    height: 30px;
-    border-radius: 6px;
-    opacity: root.enabled ? 1 : 0.4;
-    background: root.enabled && touch.has-hover ? Palette.foreground.transparentize(0.9) : transparent;
-
-    layout := HorizontalLayout {
-        padding-left: 9px;
-        padding-right: 9px;
-        alignment: center;
-        Text {
-            text: root.text;
-            font-size: root.font-size;
-            color: Palette.foreground;
-            vertical-alignment: center;
-        }
-    }
-
-    touch := TouchArea {
-        enabled: root.enabled;
-        clicked => {
-            root.clicked();
-        }
-    }
-}
-
 // A flat toolbar button that draws the refresh arrow as a path, so it matches
 // the arrow buttons' size without depending on a glyph in the UI font.
 component RefreshButton inherits Rectangle {
@@ -307,13 +302,110 @@ component RefreshButton inherits Rectangle {
         fill: transparent;
         stroke: Palette.foreground;
         stroke-width: 1.3px;
-        commands: "M 12.89 6.22 A 5.2 5.2 0 1 1 10.6 3.5 M 9.65 1.85 L 10.6 3.5 L 8.7 3.5";
+        commands: "M 12.89 6.22 A 5.2 5.2 0 1 1 10.6 3.5 M 8 1.2 L 10.8 3.5 L 8 5.8";
     }
 
     touch := TouchArea {
         mouse-cursor: pointer;
         clicked => {
             root.clicked();
+        }
+    }
+}
+
+// Back / forward / up arrows drawn as paths (short tail, big wings, like Explorer).
+component ArrowButton inherits Rectangle {
+    in property <string> commands;
+    in property <bool> enabled: true;
+    callback clicked;
+
+    horizontal-stretch: 0;
+    min-width: 30px;
+    height: 30px;
+    border-radius: 6px;
+    opacity: root.enabled ? 1 : 0.4;
+    background: root.enabled && touch.has-hover ? Palette.foreground.transparentize(0.9) : transparent;
+
+    Path {
+        x: (root.width - 16px) / 2;
+        y: (root.height - 16px) / 2;
+        width: 16px;
+        height: 16px;
+        viewbox-width: 16;
+        viewbox-height: 16;
+        fill: transparent;
+        stroke: Palette.foreground;
+        stroke-width: 1.3px;
+        commands: root.commands;
+    }
+
+    touch := TouchArea {
+        enabled: root.enabled;
+        clicked => {
+            root.clicked();
+        }
+    }
+}
+
+// Yellow favorites star: outline when off, filled when the folder is a favorite.
+component StarButton inherits Rectangle {
+    in property <bool> active;
+    callback clicked;
+
+    horizontal-stretch: 0;
+    min-width: 30px;
+    height: 30px;
+    border-radius: 6px;
+    background: touch.has-hover ? Palette.foreground.transparentize(0.9) : transparent;
+
+    Path {
+        x: (root.width - 16px) / 2;
+        y: (root.height - 16px) / 2;
+        width: 16px;
+        height: 16px;
+        viewbox-width: 16;
+        viewbox-height: 16;
+        fill: root.active ? #f5b800 : transparent;
+        stroke: #f5b800;
+        stroke-width: 1.2px;
+        commands: "M 8 1.5 L 9.97 5.9 L 14.7 6.4 L 11.2 9.6 L 12.2 14.3 L 8 11.9 L 3.8 14.3 L 4.8 9.6 L 1.3 6.4 L 6.03 5.9 Z";
+    }
+
+    touch := TouchArea {
+        mouse-cursor: pointer;
+        clicked => {
+            root.clicked();
+        }
+    }
+}
+
+// A path that keeps its end visible: when it does not fit, the start is cut behind a "…"
+// (Slint's own elide only cuts the end).
+component TailText inherits Rectangle {
+    in property <string> text;
+    in property <brush> text-color;
+    property <bool> over: full.preferred-width > self.width;
+
+    if root.over: Text {
+        x: 0px;
+        width: 12px;
+        height: root.height;
+        text: "…";
+        vertical-alignment: center;
+        color: root.text-color;
+    }
+    Rectangle {
+        x: root.over ? 12px : 0px;
+        width: root.width - self.x;
+        height: root.height;
+        clip: true;
+        full := Text {
+            x: min(0px, parent.width - self.preferred-width);
+            width: self.preferred-width;
+            height: parent.height;
+            text: root.text;
+            vertical-alignment: center;
+            color: root.text-color;
         }
     }
 }
@@ -562,6 +654,11 @@ export component AppWindow inherits Window {
     in property <int> active-tab;
     in property <[Row]> rows;
     in property <string> path;
+    // How far the address-bar crumbs are scrolled back from their right end (mouse wheel).
+    private property <length> crumb-scroll: 0px;
+    changed path => {
+        self.crumb-scroll = 0px;
+    }
     in property <[Crumb]> crumbs;
     // The "내 PC" view: drives and user folders instead of a folder listing.
     in property <bool> this-pc;
@@ -586,6 +683,11 @@ export component AppWindow inherits Window {
     // 0 = 단순 목록, 1 = 트리 구조.
     in-out property <int> search-view: 0;
     private property <bool> search-options-open: false;
+    private property <bool> settings-open: false;
+    // Settings panel: update check.
+    in property <string> app-version;
+    in-out property <bool> auto-update;
+    in property <string> update-status;
     in-out property <bool> show-hidden;
     in-out property <bool> show-ext;
     in property <bool> can-back;
@@ -625,6 +727,8 @@ export component AppWindow inherits Window {
     callback navigate(string);
     callback search(string);
     callback search-options-changed();
+    callback auto-update-changed();
+    callback check-update();
     callback row-expand(int);
     callback back();
     callback forward();
@@ -682,6 +786,7 @@ export component AppWindow inherits Window {
 
     public function focus-list() {
         root.search-options-open = false;
+        root.settings-open = false;
         root.address-editing = false;
         root.address-text = root.path;
         root.close-suggestions();
@@ -718,6 +823,9 @@ export component AppWindow inherits Window {
     // Explorer leaves a small strip on each side of the rows where a drag starts a
     // rubber-band selection instead of hitting a row.
     private property <length> list-margin: 6px;
+    // Always-blank strips above/below the rows and right of the last column.
+    private property <length> list-vmargin: 4px;
+    private property <length> blank-right: 24px;
     private property <brush> dim: Palette.foreground.transparentize(0.4);
     // Tab drag-reorder state: the tab being dragged and the slot it would land in.
     private property <int> tab-drag-from: -1;
@@ -911,25 +1019,22 @@ export component AppWindow inherits Window {
                 padding: 6px;
                 spacing: 4px;
                 cross-axis-alignment: center;
-                ToolButton {
-                    text: "←";
-                    font-size: 16px;
+                ArrowButton {
+                    commands: "M 13 8 L 3 8 M 7.5 3.5 L 3 8 L 7.5 12.5";
                     enabled: root.can-back;
                     clicked => {
                         root.back();
                     }
                 }
-                ToolButton {
-                    text: "→";
-                    font-size: 16px;
+                ArrowButton {
+                    commands: "M 3 8 L 13 8 M 8.5 3.5 L 13 8 L 8.5 12.5";
                     enabled: root.can-forward;
                     clicked => {
                         root.forward();
                     }
                 }
-                ToolButton {
-                    text: "↑";
-                    font-size: 16px;
+                ArrowButton {
+                    commands: "M 8 13 L 8 3 M 3.5 7.5 L 8 3 L 12.5 7.5";
                     clicked => {
                         root.up();
                     }
@@ -937,13 +1042,6 @@ export component AppWindow inherits Window {
                 RefreshButton {
                     clicked => {
                         root.refresh();
-                    }
-                }
-                ToolButton {
-                    text: root.favorite-active ? "★" : "☆";
-                    font-size: 17px;
-                    clicked => {
-                        root.favorite-toggle();
                     }
                 }
                 address-box := Rectangle {
@@ -957,7 +1055,7 @@ export component AppWindow inherits Window {
                     address := LineEdit {
                         x: 1px;
                         y: 1px;
-                        width: parent.width - 2px;
+                        width: parent.width - 32px;
                         height: parent.height - 2px;
                         text <=> root.address-text;
                         edited(t) => {
@@ -1008,7 +1106,7 @@ export component AppWindow inherits Window {
                     if !root.address-editing: Rectangle {
                         x: 1px;
                         y: 1px;
-                        width: parent.width - 2px;
+                        width: parent.width - 32px;
                         height: parent.height - 2px;
                         border-radius: 5px;
                         background: Palette.background;
@@ -1023,29 +1121,81 @@ export component AppWindow inherits Window {
                             }
                         }
 
-                        HorizontalLayout {
-                            padding-left: 4px;
-                            padding-right: 4px;
-                            spacing: 0px;
-                            alignment: start;
+                        // Too long: crumbs keep their full width and the row slides left so the
+                        // last folders stay visible; the cut-off start shows as "…". The wheel
+                        // scrolls back toward the start; a new folder starts at the right end.
+                        property <bool> crumbs-over: crumb-row.preferred-width > self.width;
+                        property <length> crumb-max: max(0px, crumb-row.preferred-width - crumb-clip.width);
+                        property <length> crumb-offset: min(root.crumb-scroll, crumb-max);
+                        if crumbs-over && crumb-offset < crumb-max: Text {
+                            x: 8px;
+                            width: 14px;
+                            height: parent.height;
+                            text: "…";
+                            vertical-alignment: center;
+                            color: root.dim;
+                        }
+                        crumb-clip := Rectangle {
+                            x: crumbs-over ? 22px : 0px;
+                            width: parent.width - self.x;
+                            height: parent.height;
+                            clip: true;
 
-                            for c[i] in root.crumbs: HorizontalLayout {
-                                spacing: 0px;
-                                alignment: start;
-                                if i > 0: Text {
-                                    width: 14px;
-                                    text: "\\";
-                                    horizontal-alignment: center;
-                                    vertical-alignment: center;
-                                    color: root.dim;
+                            TouchArea {
+                                mouse-cursor: text;
+                                clicked => {
+                                    root.focus-address();
                                 }
-                                CrumbButton {
-                                    title: c.title;
-                                    clicked => {
-                                        root.place-open(c.path);
+                                scroll-event(e) => {
+                                    if (!crumbs-over) {
+                                        return reject;
+                                    }
+                                    // Wheel up / left reveals the start of the path.
+                                    root.crumb-scroll = max(0px, min(crumb-max, crumb-offset + (e.delta-x != 0 ? e.delta-x : e.delta-y)));
+                                    accept
+                                }
+
+                                crumb-row := HorizontalLayout {
+                                    x: min(0px, crumb-clip.width - self.preferred-width) + crumb-offset;
+                                    width: self.preferred-width;
+                                    height: parent.height;
+                                    padding-left: 4px;
+                                    padding-right: 4px;
+                                    spacing: 0px;
+                                    alignment: start;
+
+                                    for c[i] in root.crumbs: HorizontalLayout {
+                                        spacing: 0px;
+                                        alignment: start;
+                                        // Inner box is 28px tall; crumbs are 22px, so center both the same way.
+                                        padding-top: 3px;
+                                        if i > 0: Text {
+                                            width: 14px;
+                                            height: 22px;
+                                            text: "\\";
+                                            horizontal-alignment: center;
+                                            vertical-alignment: center;
+                                            color: root.dim;
+                                        }
+                                        CrumbButton {
+                                            title: c.title;
+                                            clicked => {
+                                                root.place-open(c.path);
+                                            }
+                                        }
                                     }
                                 }
                             }
+                        }
+                    }
+                    StarButton {
+                        x: parent.width - 31px;
+                        width: 30px;
+                        y: 0px;
+                        height: parent.height;
+                        active: root.favorite-active;
+                        clicked => {
+                            root.favorite-toggle();
                         }
                     }
                 }
@@ -1111,20 +1261,10 @@ export component AppWindow inherits Window {
                         Rectangle {
                             horizontal-stretch: 1;
                         }
-                        CheckBox {
-                            text: "숨긴 항목";
-                            visible: !root.this-pc || root.search-mode;
-                            checked <=> root.show-hidden;
-                            changed checked => {
-                                root.view-changed();
-                            }
-                        }
-                        CheckBox {
-                            text: "파일 확장명";
-                            visible: !root.this-pc || root.search-mode;
-                            checked <=> root.show-ext;
-                            changed checked => {
-                                root.view-changed();
+                        settings-button := GearButton {
+                            clicked => {
+                                root.search-options-open = false;
+                                root.settings-open = !root.settings-open;
                             }
                         }
                     }
@@ -1139,7 +1279,7 @@ export component AppWindow inherits Window {
                             name-header := HeaderCell {
                                 width: root.w-name;
                                 min-column-width: 120px;
-                                max-column-width: max(120px, header-bar.width - root.list-margin - 7px);
+                                max-column-width: max(120px, header-bar.width - root.list-margin - 7px - root.blank-right);
                                 fit-width: max(120px, measure-name.preferred-width + 34px);
                                 text: "이름";
                                 sorted: root.sort-column == 0;
@@ -1157,7 +1297,7 @@ export component AppWindow inherits Window {
                             if root.search-mode: location-header := HeaderCell {
                                 width: root.w-location;
                                 min-column-width: 90px;
-                                max-column-width: max(90px, header-bar.width - root.list-margin - 7px - root.w-name);
+                                max-column-width: max(90px, header-bar.width - root.list-margin - 7px - root.blank-right - root.w-name);
                                 fit-width: max(90px, measure-location.preferred-width + 24px);
                                 text: "위치";
                                 resize(w) => {
@@ -1170,7 +1310,7 @@ export component AppWindow inherits Window {
                             date-header := HeaderCell {
                                 width: root.w-date;
                                 min-column-width: 100px;
-                                max-column-width: max(100px, header-bar.width - root.list-margin - 7px - root.w-name - (root.search-mode ? root.w-location : 0px));
+                                max-column-width: max(100px, header-bar.width - root.list-margin - 7px - root.blank-right - root.w-name - (root.search-mode ? root.w-location : 0px));
                                 fit-width: max(100px, measure-date.preferred-width + 22px);
                                 text: root.this-pc && !root.search-mode ? "여유 공간" : "수정한 날짜";
                                 sorted: root.sort-column == 1;
@@ -1188,7 +1328,7 @@ export component AppWindow inherits Window {
                             kind-header := HeaderCell {
                                 width: root.w-kind;
                                 min-column-width: 70px;
-                                max-column-width: max(70px, header-bar.width - root.list-margin - 7px - root.w-name - (root.search-mode ? root.w-location : 0px) - root.w-date);
+                                max-column-width: max(70px, header-bar.width - root.list-margin - 7px - root.blank-right - root.w-name - (root.search-mode ? root.w-location : 0px) - root.w-date);
                                 fit-width: max(70px, measure-kind.preferred-width + 22px);
                                 text: "유형";
                                 sorted: root.sort-column == 2;
@@ -1206,7 +1346,7 @@ export component AppWindow inherits Window {
                             size-header := HeaderCell {
                                 width: root.w-size;
                                 min-column-width: 70px;
-                                max-column-width: max(70px, header-bar.width - root.list-margin - 7px - root.w-name - (root.search-mode ? root.w-location : 0px) - root.w-date - root.w-kind);
+                                max-column-width: max(70px, header-bar.width - root.list-margin - 7px - root.blank-right - root.w-name - (root.search-mode ? root.w-location : 0px) - root.w-date - root.w-kind);
                                 fit-width: max(70px, measure-size.preferred-width + 22px);
                                 text: root.this-pc && !root.search-mode ? "전체 용량" : "크기";
                                 sorted: root.sort-column == 3;
@@ -1267,19 +1407,32 @@ export component AppWindow inherits Window {
                             }
                             moved => {
                                 if root.rubber-on {
-                                    root.rubber-move(blank-touch.pressed-y, blank-touch.mouse-y);
+                                    root.rubber-move(blank-touch.pressed-y - root.list-vmargin, blank-touch.mouse-y - root.list-vmargin);
                                 }
                             }
 
                         list := ListView {
                             x: root.list-margin;
+                            y: root.list-vmargin;
                             width: parent.width - 2 * root.list-margin;
-                            height: 100%;
+                            height: parent.height - root.list-vmargin;
+                            // Extra scrollable space so the last row clears the bottom edge.
+                            content-height: root.rows.length * root.row-height + root.list-vmargin;
                             for r[i] in root.rows: Rectangle {
                                 height: root.row-height;
-                                background: i == root.drop-row ? Palette.accent-background.transparentize(0.6) : r.selected ? Palette.accent-background.transparentize(list-focus.has-focus ? 0.75 : 0.88) : row-touch.has-hover ? Palette.foreground.transparentize(0.95) : transparent;
+                                // Columns end before the right edge; what lies beyond acts as blank space.
+                                private property <length> cols-w: min(
+                                    parent.width - root.blank-right,
+                                    6px + root.w-name + (root.search-mode ? root.w-location : 0px) + root.w-date + root.w-kind + root.w-size);
+                                Rectangle {
+                                    x: 0px;
+                                    width: parent.cols-w;
+                                    background: i == root.drop-row ? Palette.accent-background.transparentize(0.6) : r.selected ? Palette.accent-background.transparentize(list-focus.has-focus ? 0.75 : 0.88) : row-touch.has-hover ? Palette.foreground.transparentize(0.95) : transparent;
+                                }
 
                                 row-touch := TouchArea {
+                                    x: 0px;
+                                    width: parent.cols-w;
                                     pointer-event(e) => {
                                         if e.kind == PointerEventKind.down && e.button == PointerEventButton.left {
                                             list-focus.focus();
@@ -1331,12 +1484,18 @@ export component AppWindow inherits Window {
                                     if root.search-mode: Rectangle {
                                         width: 14px;
                                         height: 100%;
-                                        Text {
-                                            text: !r.expandable ? "" : r.expanded ? "▾" : "▸";
-                                            font-size: 9px;
-                                            horizontal-alignment: center;
-                                            vertical-alignment: center;
-                                            color: root.dim;
+                                        // Drawn as a path: the glyph is missing from some UI fonts.
+                                        if r.expandable: Path {
+                                            x: (parent.width - 8px) / 2;
+                                            y: (parent.height - 8px) / 2;
+                                            width: 8px;
+                                            height: 8px;
+                                            viewbox-width: 8;
+                                            viewbox-height: 8;
+                                            fill: transparent;
+                                            stroke: root.dim;
+                                            stroke-width: 1.2px;
+                                            commands: r.expanded ? "M 0.5 2.5 L 4 6 L 7.5 2.5" : "M 2.5 0.5 L 6 4 L 2.5 7.5";
                                         }
                                         if r.expandable: TouchArea {
                                             clicked => {
@@ -1362,35 +1521,54 @@ export component AppWindow inherits Window {
                                         vertical-alignment: center;
                                         color: Palette.foreground;
                                     }
-                                    if r.editing: LineEdit {
+                                    if r.editing: Rectangle {
                                         width: max(0px, root.w-name - 22px - tree-indent);
-                                        text: r.name;
-                                        init => {
-                                            self.focus();
-                                            self.set-selection-offsets(0, r.stem);
-                                        }
-                                        accepted(t) => {
-                                            root.rename-done(t, true);
-                                        }
-                                        key-pressed(e) => {
-                                            if e.text == Key.Escape {
-                                                root.rename-done("", false);
-                                                return accept;
-                                            }
-                                            reject
-                                        }
-                                        changed has-focus => {
-                                            if !self.has-focus {
-                                                root.rename-done(self.text, true);
+                                        // The text stays where the name was drawn; the field's box grows
+                                        // 5px to the left of it and stops 10px short of the next column.
+                                        Rectangle {
+                                            x: -5px;
+                                            width: parent.width - 5px;
+                                            height: parent.height;
+                                            border-radius: 4px;
+                                            background: Palette.background;
+                                            border-width: 1px;
+                                            border-color: Palette.accent-background;
+                                            edit-scope := FocusScope {
+                                                key-pressed(e) => {
+                                                    if e.text == Key.Escape {
+                                                        root.rename-done("", false);
+                                                        return accept;
+                                                    }
+                                                    reject
+                                                }
+                                                edit := TextInput {
+                                                    x: 5px;
+                                                    width: parent.width - 10px;
+                                                    height: parent.height;
+                                                    text: r.name;
+                                                    color: Palette.foreground;
+                                                    vertical-alignment: center;
+                                                    single-line: true;
+                                                    init => {
+                                                        self.focus();
+                                                        self.set-selection-offsets(0, r.stem);
+                                                    }
+                                                    accepted => {
+                                                        root.rename-done(self.text, true);
+                                                    }
+                                                    changed has-focus => {
+                                                        if !self.has-focus {
+                                                            root.rename-done(self.text, true);
+                                                        }
+                                                    }
+                                                }
                                             }
                                         }
                                     }
-                                    if root.search-mode: Text {
+                                    if root.search-mode: TailText {
                                         width: root.w-location;
                                         text: r.location;
-                                        overflow: elide;
-                                        vertical-alignment: center;
-                                        color: root.dim;
+                                        text-color: root.dim;
                                     }
                                     Rectangle {
                                         width: root.w-date;
@@ -1525,12 +1703,10 @@ export component AppWindow inherits Window {
                             vertical-alignment: center;
                             color: Palette.foreground;
                         }
-                        Text {
+                        TailText {
                             horizontal-stretch: 1;
                             text: s.detail;
-                            overflow: elide;
-                            vertical-alignment: center;
-                            color: root.dim;
+                            text-color: root.dim;
                         }
                     }
 
@@ -1625,6 +1801,82 @@ export component AppWindow inherits Window {
             }
         }
 
+        // Settings: a small panel anchored under the gear button.
+        if root.settings-open: TouchArea {
+            width: 100%;
+            height: 100%;
+            clicked => {
+                root.settings-open = false;
+            }
+        }
+
+        if root.settings-open: Rectangle {
+            x: max(8px, min(settings-button.absolute-position.x + settings-button.width - 268px, root.width - 268px));
+            y: settings-button.absolute-position.y + settings-button.height + 4px;
+            width: 260px;
+            height: settings-panel.preferred-height + 20px;
+            background: Palette.background;
+            border-radius: 6px;
+            border-width: 1px;
+            border-color: Palette.foreground.transparentize(0.65);
+            drop-shadow-blur: 12px;
+            drop-shadow-color: #00000038;
+            drop-shadow-offset-y: 4px;
+            clip: true;
+
+            settings-panel := VerticalLayout {
+                padding: 10px;
+                spacing: 5px;
+
+                Text { text: "설정"; font-size: 13px; color: Palette.foreground; }
+                Rectangle { height: 2px; }
+
+                Text { text: "보기"; font-size: 12px; color: root.dim; }
+                CheckBox {
+                    text: "숨긴 항목 표시";
+                    checked <=> root.show-hidden;
+                    changed checked => {
+                        root.view-changed();
+                    }
+                }
+                CheckBox {
+                    text: "파일 확장명 표시";
+                    checked <=> root.show-ext;
+                    changed checked => {
+                        root.view-changed();
+                    }
+                }
+
+                Rectangle { height: 4px; }
+
+                Text { text: "업데이트"; font-size: 12px; color: root.dim; }
+                Text { text: "Fast Explorer v" + root.app-version; color: Palette.foreground; }
+                CheckBox {
+                    text: "자동으로 업데이트 확인 (하루 한 번)";
+                    checked <=> root.auto-update;
+                    changed checked => {
+                        root.auto-update-changed();
+                    }
+                }
+                HorizontalLayout {
+                    spacing: 8px;
+                    Button {
+                        text: "지금 확인";
+                        clicked => {
+                            root.check-update();
+                        }
+                    }
+                    Text {
+                        text: root.update-status;
+                        color: root.dim;
+                        vertical-alignment: center;
+                        wrap: word-wrap;
+                        horizontal-stretch: 1;
+                    }
+                }
+            }
+        }
+
         // Off-screen samples for "fit column to contents" (double-click a header divider).
         // Measuring with real Text elements keeps the fit identical to what the rows render.
         Rectangle {
@@ -1674,6 +1926,303 @@ export component AppWindow inherits Window {
         pointer-event(e) => {
             if e.kind == PointerEventKind.up || e.kind == PointerEventKind.cancel {
                 root.click-shield = false;
+            }
+        }
+    }
+}
+
+// ---------- Batch rename dialog ----------
+
+export struct RenameRow {
+    old: string,
+    new: string,
+    // Empty when fine; otherwise why this row cannot be renamed.
+    problem: string,
+    changed: bool,
+}
+
+export component RenameWindow inherits Window {
+    title: "여러 항목 이름 바꾸기";
+    icon: @image-url("assets/icon-256.png");
+    preferred-width: 780px;
+    preferred-height: 600px;
+    min-width: 560px;
+    min-height: 420px;
+    background: Palette.background;
+
+    in-out property <string> find;
+    in-out property <string> replace;
+    in-out property <bool> use-regex: false;
+    in-out property <bool> match-case: false;
+    in-out property <bool> replace-all: true;
+    // 0 = 이름(확장자 제외), 1 = 확장자, 2 = 전체
+    in-out property <int> part: 0;
+    // 0 = 그대로, 1 = 소문자, 2 = 대문자
+    in-out property <int> case-mode: 0;
+    in property <[RenameRow]> rows;
+    in property <string> summary;
+    in property <string> error;
+    in property <bool> can-apply;
+    in property <bool> busy;
+    callback changed();
+    callback apply();
+    callback cancel();
+
+    FocusScope {
+        key-pressed(e) => {
+            if e.text == Key.Escape {
+                root.cancel();
+                return accept;
+            }
+            reject
+        }
+
+        VerticalLayout {
+            padding: 16px;
+            spacing: 10px;
+
+            GridLayout {
+                spacing: 8px;
+                Row {
+                    Text { text: "찾을 내용"; vertical-alignment: center; color: Palette.foreground; }
+                    LineEdit {
+                        text <=> root.find;
+                        placeholder-text: "비워 두면 대/소문자만 바꿈";
+                        edited => { root.changed(); }
+                        accepted => { if root.can-apply { root.apply(); } }
+                    }
+                }
+                Row {
+                    Text { text: "바꿀 내용"; vertical-alignment: center; color: Palette.foreground; }
+                    LineEdit {
+                        text <=> root.replace;
+                        placeholder-text: "{n} = 번호, {n:3} = 001  (정규식: $1, $2)";
+                        edited => { root.changed(); }
+                        accepted => { if root.can-apply { root.apply(); } }
+                    }
+                }
+            }
+
+            HorizontalLayout {
+                spacing: 16px;
+                CheckBox {
+                    text: "정규식";
+                    checked <=> root.use-regex;
+                    toggled => { root.changed(); }
+                }
+                CheckBox {
+                    text: "대/소문자 구분";
+                    checked <=> root.match-case;
+                    toggled => { root.changed(); }
+                }
+                CheckBox {
+                    text: "모두 바꾸기";
+                    checked <=> root.replace-all;
+                    toggled => { root.changed(); }
+                }
+            }
+
+            HorizontalLayout {
+                spacing: 4px;
+                alignment: start;
+                Text { text: "적용 대상"; vertical-alignment: center; color: Palette.foreground; width: 64px; }
+                OptionChoice { width: 110px; text: "이름"; selected: root.part == 0; clicked => { root.part = 0; root.changed(); } }
+                OptionChoice { width: 90px; text: "확장자"; selected: root.part == 1; clicked => { root.part = 1; root.changed(); } }
+                OptionChoice { width: 90px; text: "전체"; selected: root.part == 2; clicked => { root.part = 2; root.changed(); } }
+                Rectangle { width: 24px; }
+                Text { text: "대/소문자"; vertical-alignment: center; color: Palette.foreground; width: 64px; }
+                OptionChoice { width: 80px; text: "유지"; selected: root.case-mode == 0; clicked => { root.case-mode = 0; root.changed(); } }
+                OptionChoice { width: 80px; text: "소문자"; selected: root.case-mode == 1; clicked => { root.case-mode = 1; root.changed(); } }
+                OptionChoice { width: 80px; text: "대문자"; selected: root.case-mode == 2; clicked => { root.case-mode = 2; root.changed(); } }
+            }
+
+            Text {
+                visible: root.error != "";
+                height: root.error == "" ? 0px : self.preferred-height;
+                text: root.error;
+                color: #e81123;
+                wrap: word-wrap;
+            }
+
+            // Preview
+            Rectangle {
+                vertical-stretch: 1;
+                border-width: 1px;
+                border-color: Palette.foreground.transparentize(0.8);
+                border-radius: 4px;
+                clip: true;
+                ListView {
+                    for r in root.rows: Rectangle {
+                        height: 26px;
+                        background: r.problem != "" ? #e81123.transparentize(0.9) : transparent;
+                        HorizontalLayout {
+                            padding-left: 8px;
+                            padding-right: 8px;
+                            spacing: 8px;
+                            Text {
+                                horizontal-stretch: 1;
+                                min-width: 0px;
+                                text: r.old;
+                                overflow: elide;
+                                vertical-alignment: center;
+                                color: r.changed ? Palette.foreground.transparentize(0.4) : Palette.foreground;
+                            }
+                            Text {
+                                text: r.changed ? "→" : "";
+                                width: 16px;
+                                vertical-alignment: center;
+                                color: Palette.foreground.transparentize(0.4);
+                            }
+                            Text {
+                                horizontal-stretch: 1;
+                                min-width: 0px;
+                                text: r.problem != "" ? r.new + "   ⚠ " + r.problem : r.changed ? r.new : "";
+                                overflow: elide;
+                                vertical-alignment: center;
+                                color: r.problem != "" ? #e81123 : Palette.accent-background;
+                            }
+                        }
+                    }
+                }
+            }
+
+            HorizontalLayout {
+                spacing: 8px;
+                Text {
+                    horizontal-stretch: 1;
+                    text: root.summary;
+                    vertical-alignment: center;
+                    color: Palette.foreground.transparentize(0.3);
+                }
+                Button {
+                    text: "취소";
+                    clicked => { root.cancel(); }
+                }
+                Button {
+                    text: "이름 바꾸기";
+                    primary: true;
+                    enabled: root.can-apply && !root.busy;
+                    clicked => { root.apply(); }
+                }
+            }
+        }
+    }
+}
+
+// ---------- "In use by" dialog ----------
+
+export struct LockRow {
+    name: string,
+    pid: string,
+    path: string,
+    service: bool,
+}
+
+export component LocksWindow inherits Window {
+    title: "사용 중인 프로세스";
+    icon: @image-url("assets/icon-256.png");
+    preferred-width: 640px;
+    preferred-height: 420px;
+    min-width: 480px;
+    min-height: 260px;
+    background: Palette.background;
+
+    in property <string> header;
+    in property <string> status;
+    in property <[LockRow]> rows;
+    in property <bool> busy;
+    callback kill(int);
+    callback kill-all();
+    callback refresh();
+    callback cancel();
+
+    FocusScope {
+        key-pressed(e) => {
+            if e.text == Key.Escape {
+                root.cancel();
+                return accept;
+            }
+            reject
+        }
+
+        VerticalLayout {
+            padding: 16px;
+            spacing: 10px;
+
+            Text {
+                text: root.header;
+                color: Palette.foreground;
+                overflow: elide;
+            }
+
+            Rectangle {
+                vertical-stretch: 1;
+                border-width: 1px;
+                border-color: Palette.foreground.transparentize(0.8);
+                border-radius: 4px;
+                clip: true;
+                ListView {
+                    for r[i] in root.rows: Rectangle {
+                        height: 44px;
+                        HorizontalLayout {
+                            padding-left: 10px;
+                            padding-right: 8px;
+                            spacing: 8px;
+                            VerticalLayout {
+                                horizontal-stretch: 1;
+                                alignment: center;
+                                Text {
+                                    text: r.name + "  (PID " + r.pid + ")" + (r.service ? "  · 서비스" : "");
+                                    overflow: elide;
+                                    color: Palette.foreground;
+                                }
+                                Text {
+                                    text: r.path;
+                                    overflow: elide;
+                                    font-size: 11px;
+                                    color: Palette.foreground.transparentize(0.4);
+                                }
+                            }
+                            Button {
+                                text: "종료";
+                                enabled: !root.busy;
+                                clicked => { root.kill(i); }
+                            }
+                        }
+                    }
+                }
+                if root.rows.length == 0: Text {
+                    text: root.busy ? "검색 중…" : "사용 중인 프로세스가 없습니다";
+                    horizontal-alignment: center;
+                    vertical-alignment: center;
+                    color: Palette.foreground.transparentize(0.4);
+                }
+            }
+
+            HorizontalLayout {
+                spacing: 8px;
+                Text {
+                    horizontal-stretch: 1;
+                    text: root.status;
+                    overflow: elide;
+                    vertical-alignment: center;
+                    color: Palette.foreground.transparentize(0.3);
+                }
+                Button {
+                    text: "새로 고침";
+                    enabled: !root.busy;
+                    clicked => { root.refresh(); }
+                }
+                Button {
+                    text: "모두 종료";
+                    enabled: !root.busy && root.rows.length > 0;
+                    clicked => { root.kill-all(); }
+                }
+                Button {
+                    text: "닫기";
+                    primary: true;
+                    clicked => { root.cancel(); }
+                }
             }
         }
     }

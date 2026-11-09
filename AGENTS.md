@@ -30,13 +30,18 @@ cargo fmt                               # 포맷 (rustfmt 설정 파일은 없�
 | `core/src/menu.rs` | 셸 메뉴 호스트 클라이언트와 stdio 프로토콜 |
 | `core/src/watch.rs` | `ReadDirectoryChangesW` 기반 폴더 감시 |
 | `core/src/icons.rs` | 셸 아이콘 → RGBA |
+| `core/src/rename.rs` | 일괄 이름 바꾸기 규칙과 미리보기 계획 (순수 로직, 단위 테스트 있음) |
+| `core/src/locks.rs` | Restart Manager로 파일을 잡은 프로세스 찾기/종료 |
 | `ui/` (`fex`) | Slint 앱. `app.slint` + `src/main.rs`, `tree.rs`, `dnd.rs`, `popup.rs` |
 | `ui/src/main.rs` | `App`/`Tab`/`Rows` 상태, 이벤트 배선, 검색·탭·파일 작업, Win32 창 처리 |
 | `ui/src/tree.rs` | 검색 결과 폴더 트리와 가상화된 행 순서 |
 | `ui/src/dnd.rs` | OLE `IDropSource`/`IDropTarget` |
 | `ui/src/popup.rs` | Win32 팝업 메뉴 (자체 명령 + 셸 항목) |
+| `ui/src/tools.rs` | 여러 이름 바꾸기 / 사용 중인 프로세스 대화상자 (`RenameWindow`, `LocksWindow`) |
 | `shell-host/` | 셸 확장 메뉴를 격리 실행하는 별도 프로세스 |
 | `index-service/` | MFT/USN 색인 Windows 서비스와 설치/제거 CLI |
+| `ui/src/update.rs` | `latest.json` 업데이트 확인/다운로드 (Windows 내장 `curl.exe`) |
+| `installer/` | Inno Setup 스크립트 `fex.iss`와 `build.ps1`. 릴리스는 `.github/workflows/release.yml` |
 
 ## 아키텍처 규칙
 
@@ -53,11 +58,12 @@ cargo fmt                               # 포맷 (rustfmt 설정 파일은 없�
 - 인덱스 서비스는 LocalSystem으로 실행되며 설치 사용자 SID만 파이프에 허용합니다. 이 경계를 넓히지 마세요.
 - 앱은 **Program Files 아래에 있을 때만** 인덱스 서비스 설치를 승격 제안합니다. 사용자가 덮어쓸 수 있는 실행 파일을 관리자로 실행하면 권한 상승 취약점이 됩니다.
 - 인덱스 서비스는 클라이언트가 나열할 수 없는 폴더의 결과를 숨깁니다(`visible_to_client`). 이 필터를 우회하는 경로를 만들지 마세요.
+- 업데이트는 자기 저장소의 `releases/download/` 주소만 받고, 설치 전에 항상 사용자에게 묻습니다. 무음 설치를 추가하지 마세요.
 - 셸 확장은 신뢰할 수 없는 코드입니다. 반드시 `fex-shell-host`에서 실행하고, 응답이 없으면 교체하는 `HANG_LIMIT`(10초) 동작을 유지하세요.
 
 ## 프로토콜
 
-- **셸 메뉴**: 호스트 stdin/stdout에 한 줄에 하나의 요청, 탭 구분 필드입니다. 요청/응답 형식은 `core/src/menu.rs` 상단 주석과 `shell-host/src/main.rs`에 있습니다. 양쪽을 함께 바꾸고 `shell-host/tests/protocol.rs`로 검증하세요.
+- **셸 메뉴**: 호스트 stdin/stdout에 한 줄에 하나의 요청, 탭 구분 필드입니다. 요청/응답 형식은 `core/src/menu.rs` 상단 주석과 `shell-host/src/main.rs`에 있습니다. 항목 줄은 `depth id flags verb icon label` 순서이며, `icon`은 `WxH:` + 16진 BGRA(미리 곱한 알파) 또는 빈 문자열입니다. 양쪽을 함께 바꾸고 `shell-host/tests/protocol.rs`로 검증하세요.
 - **인덱스**: 요청 `S\t<limit>\t<scope-kind>\t<scope-path>\t<query>`, 응답 첫 줄 `OK2\t<count>\t<indexing>\t<more>`. 구버전 `OK` 응답은 거부되어 재설치를 안내합니다. 형식을 바꾸면 `REPLY_OK` 버전을 올리고 `index-service/tests/live.rs`를 갱신하세요.
 - **인코딩**: 경로는 `menu::enc_path`/`dec_path`로 파이프/stdio에서 안전하게 주고받습니다. 탭·개행이 들어가는 필드는 반드시 이스케이프하세요.
 

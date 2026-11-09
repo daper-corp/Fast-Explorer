@@ -31,7 +31,7 @@ use windows::Win32::Graphics::Gdi::{
 use windows::Win32::UI::Controls::MARGINS;
 use windows::Win32::UI::Input::KeyboardAndMouse::{GetAsyncKeyState, VK_LBUTTON};
 use windows::Win32::UI::Shell::{
-    DefSubclassProc, SetWindowSubclass, SIID_DELETE, SIID_DOCNOASSOC, SIID_FOLDER, SIID_LINK, SIID_RENAME,
+    DefSubclassProc, SetWindowSubclass, SIID_DELETE, SIID_DOCNOASSOC, SIID_FOLDER, SIID_RENAME,
     SIID_SETTINGS,
 };
 use windows::Win32::UI::WindowsAndMessaging::{
@@ -42,7 +42,9 @@ use windows::Win32::UI::WindowsAndMessaging::{
 
 mod dnd;
 mod popup;
+mod tools;
 mod tree;
+mod update;
 
 /// Gives one of our menu commands an icon.
 fn with_icon(o: Own, icon: popup::Icon) -> Own {
@@ -68,6 +70,8 @@ const CMD_RETRY: u32 = 0x800D;
 const CMD_NEW_FILE: u32 = 0x800E;
 const CMD_ADD_FAVORITE: u32 = 0x800F;
 const CMD_SEARCH_HERE: u32 = 0x8010;
+const CMD_RENAME_MANY: u32 = 0x8011;
+const CMD_LOCKS: u32 = 0x8012;
 
 /// How long a right-click waits for a shell menu that isn't prefetched yet.
 const MENU_WAIT: Duration = Duration::from_millis(150);
@@ -425,6 +429,8 @@ enum Undo {
     Move { pairs: Vec<(PathBuf, PathBuf)> },
     Copy { created: Vec<PathBuf> },
     Delete { items: Vec<shell::TrashedItem> },
+    /// `(old path, new path)` for each item of a batch rename.
+    RenameMany { pairs: Vec<(PathBuf, PathBuf)> },
 }
 
 /// Applied once the next listing of a tab is ready.
@@ -434,6 +440,12 @@ struct After {
     rename: bool,
     /// The listing came from the folder watcher, not from the user.
     auto: bool,
+}
+
+/// When `target` is an ancestor of `from`, selects the child of `target` we are coming from.
+fn came_from(from: &Path, target: &Path) -> Option<After> {
+    let name = from.strip_prefix(target).ok()?.components().next()?;
+    Some(After { select: vec![name.as_os_str().to_string_lossy().into_owned()], ..Default::default() })
 }
 
 /// How search results are matched and shown for one tab.
@@ -755,7 +767,17 @@ impl App {
     fn sync_tabs(&self) {
         let titles: Vec<TabInfo> =
             self.tabs.borrow().iter().map(|t| TabInfo { title: t.title().into() }).collect();
-        self.tab_model.set_vec(titles);
+        // Update in place when the count is unchanged: replacing the model would rebuild the
+        // tab elements and drop the pointer grab of a tab drag in progress.
+        if titles.len() == self.tab_model.row_count() {
+            for (i, t) in titles.into_iter().enumerate() {
+                if self.tab_model.row_data(i).is_none_or(|o| o.title != t.title) {
+                    self.tab_model.set_row_data(i, t);
+                }
+            }
+        } else {
+            self.tab_model.set_vec(titles);
+        }
     }
 
     /// Pushes the active tab's path, history, sort and status to the window.
@@ -954,6 +976,23 @@ impl App {
         ui.set_fit_date(fit.date.into());
         ui.set_fit_kind(fit.kind.into());
         ui.set_fit_size(fit.size.into());
+    }
+
+    /// A failed file operation: the status note plus a message box, so it cannot go unnoticed.
+    fn show_error(&self, t: &Tab, what: &str, e: &io::Error) {
+        // ERROR_SHARING_VIOLATION / ERROR_LOCK_VIOLATION: another process holds the file.
+        let busy = matches!(e.raw_os_error(), Some(32 | 33));
+        let mut text = format!("{what}\n\n{e}");
+        if busy {
+            text.push_str("\n\n다른 프로세스가 사용 중인 파일이나 폴더일 수 있습니다. 해당 프로그램을 닫고 다시 시도하세요.");
+        }
+        self.alert(text);
+        self.set_note(t, format!("실패: {e}"));
+    }
+
+    fn alert(&self, text: String) {
+        let hwnd = self.hwnd();
+        thread::spawn(move || shell::alert(hwnd, &text));
     }
 
     fn set_note(&self, t: &Tab, note: String) {
@@ -1511,9 +1550,10 @@ impl App {
         if self.rubber_last.replace(key) == key {
             return;
         }
+        // Selection is indexed by entry, not row: hidden items and collapsed tree nodes have no row.
         let base = self.rubber_base.borrow();
-        let mut want = vec![false; n];
-        if base.len() == n {
+        let mut want = vec![false; t.rows.selected.borrow().len()];
+        if base.len() == want.len() {
             want.copy_from_slice(&base);
         }
         if !empty {
@@ -1683,6 +1723,7 @@ impl App {
             _ if ctrl && ch == 'v' => self.paste(),
             _ if ctrl && ch == 'z' && in_list => self.undo(),
             _ if is(Key::Delete) => self.delete(shift),
+            _ if is(Key::F2) && shift => self.rename_many(),
             _ if is(Key::F2) => self.start_rename(),
             _ if ctrl && ch == ' ' => {
                 if let Some(c) = t.cursor.get() {
@@ -1758,7 +1799,8 @@ impl App {
         let pos = t.hist_pos.get();
         if pos > 0 {
             let p = t.history.borrow()[pos - 1].clone();
-            self.navigate(&t, p, Hist::Go(pos - 1), None);
+            let after = came_from(&t.cwd.borrow(), &p);
+            self.navigate(&t, p, Hist::Go(pos - 1), after);
         }
     }
 
@@ -1767,7 +1809,8 @@ impl App {
         let pos = t.hist_pos.get();
         let next = t.history.borrow().get(pos + 1).cloned();
         if let Some(p) = next {
-            self.navigate(&t, p, Hist::Go(pos + 1), None);
+            let after = came_from(&t.cwd.borrow(), &p);
+            self.navigate(&t, p, Hist::Go(pos + 1), after);
         }
     }
 
@@ -2320,6 +2363,42 @@ impl App {
         });
     }
 
+    /// Looks for a newer release on a worker thread and shows the outcome in the settings panel.
+    /// Installing always asks first and runs the installer (UAC); we quit so it can replace files.
+    fn check_update(&self) {
+        let hwnd = self.hwnd();
+        self.ui().set_update_status("확인 중…".into());
+        thread::spawn(move || {
+            let found = update::check();
+            update::mark_checked();
+            let status = match &found {
+                Ok(Some(rel)) => format!("새 버전 v{} 있음", rel.version),
+                Ok(None) => "최신 버전입니다".to_string(),
+                Err(e) => format!("확인 실패: {e}"),
+            };
+            post(move |a| a.ui().set_update_status(status.into()));
+            let Ok(Some(rel)) = found else { return };
+            let ask = format!(
+                "새 버전 v{}을(를) 사용할 수 있습니다 (현재 v{}).\n\n지금 다운로드하여 설치할까요? 설치 중 Fast Explorer가 닫힙니다.",
+                rel.version,
+                update::CURRENT
+            );
+            if !shell::confirm(hwnd, &ask) {
+                return;
+            }
+            post(|a| a.ui().set_update_status("다운로드 중…".into()));
+            match update::download(&rel).map_err(io::Error::other).and_then(|f| shell::open(&f)) {
+                Ok(()) => post(|_| {
+                    let _ = slint::quit_event_loop();
+                }),
+                Err(e) => {
+                    post(|a| a.ui().set_update_status("업데이트 실패".into()));
+                    shell::alert(hwnd, &format!("업데이트 실패: {e}"));
+                }
+            }
+        });
+    }
+
     // ---------- context menus ----------
 
     fn next_seq(&self) -> u64 {
@@ -2387,8 +2466,9 @@ impl App {
         t.cursor.set(Some(i));
         self.update_status(&t);
         let at = cursor_pos();
-        // Run the menu's modal loop outside the pointer-event handler.
-        let _ = slint::invoke_from_event_loop(move || app(|a| a.context_menu(false, at)));
+        // Run the menu's modal loop outside the pointer-event handler, after a repaint
+        // so the selection highlight is visible while the menu is open.
+        slint::Timer::single_shot(Duration::from_millis(30), move || app(|a| a.context_menu(false, at)));
     }
 
     fn blank_pressed(&self, right: bool, ctrl: bool) {
@@ -2450,22 +2530,22 @@ impl App {
 
         let mut top = if background {
             vec![
-                Own { disabled: !shell::clipboard_has_files(), ..own(CMD_PASTE, "붙여넣기\tCtrl+V") },
+                with_icon(Own { disabled: !shell::clipboard_has_files(), ..own(CMD_PASTE, "붙여넣기\tCtrl+V") }, popup::Icon::Glyph(popup::glyph::PASTE)),
                 with_icon(own(CMD_NEW_FOLDER, "새 폴더\tCtrl+Shift+N"), popup::Icon::Stock(SIID_FOLDER)),
                 with_icon(own(CMD_NEW_FILE, "새 텍스트 문서"), popup::Icon::Stock(SIID_DOCNOASSOC)),
-                own(CMD_REFRESH, "새로 고침\tF5"),
+                with_icon(own(CMD_REFRESH, "새로 고침\tF5"), popup::Icon::Glyph(popup::glyph::REFRESH)),
                 SEP,
-                own(CMD_SEARCH_HERE, "이 폴더에서 검색"),
-                with_icon(own(CMD_ADD_FAVORITE, "즐겨찾기에 추가"), popup::Icon::Stock(SIID_LINK)),
+                with_icon(own(CMD_SEARCH_HERE, "이 폴더에서 검색"), popup::Icon::Glyph(popup::glyph::SEARCH)),
+                with_icon(own(CMD_ADD_FAVORITE, "즐겨찾기에 추가"), popup::Icon::Glyph(popup::glyph::STAR)),
             ]
         } else if at_this_pc(&t) {
             vec![
                 Own { default: true, ..own(CMD_OPEN, "열기\tEnter") },
-                own(CMD_OPEN_TAB, "새 탭에서 열기"),
-                own(CMD_SEARCH_HERE, "이 폴더에서 검색"),
-                own(CMD_ADD_FAVORITE, "즐겨찾기에 추가"),
+                with_icon(own(CMD_OPEN_TAB, "새 탭에서 열기"), popup::Icon::Glyph(popup::glyph::NEW_TAB)),
+                with_icon(own(CMD_SEARCH_HERE, "이 폴더에서 검색"), popup::Icon::Glyph(popup::glyph::SEARCH)),
+                with_icon(own(CMD_ADD_FAVORITE, "즐겨찾기에 추가"), popup::Icon::Glyph(popup::glyph::STAR)),
                 SEP,
-                own(CMD_COPY_PATH, "경로 복사\tCtrl+Shift+C"),
+                with_icon(own(CMD_COPY_PATH, "경로 복사\tCtrl+Shift+C"), popup::Icon::Glyph(popup::glyph::LINK)),
             ]
         } else {
             let sel = t.rows.selection();
@@ -2480,21 +2560,24 @@ impl App {
             if let [i] = sel[..]
                 && t.rows.is_dir(i)
             {
-                v.push(with_icon(own(CMD_OPEN_TAB, "새 탭에서 열기"), popup::Icon::Path(paths[0].clone())));
-                v.push(own(CMD_SEARCH_HERE, "이 폴더에서 검색"));
-                v.push(with_icon(own(CMD_ADD_FAVORITE, "즐겨찾기에 추가"), popup::Icon::Stock(SIID_LINK)));
+                v.push(with_icon(own(CMD_OPEN_TAB, "새 탭에서 열기"), popup::Icon::Glyph(popup::glyph::NEW_TAB)));
+                v.push(with_icon(own(CMD_SEARCH_HERE, "이 폴더에서 검색"), popup::Icon::Glyph(popup::glyph::SEARCH)));
+                v.push(with_icon(own(CMD_ADD_FAVORITE, "즐겨찾기에 추가"), popup::Icon::Glyph(popup::glyph::STAR)));
             }
             v.extend([
                 SEP,
-                own(CMD_CUT, "잘라내기\tCtrl+X"),
-                own(CMD_COPY, "복사\tCtrl+C"),
-                own(CMD_COPY_PATH, "경로 복사\tCtrl+Shift+C"),
+                with_icon(own(CMD_CUT, "잘라내기\tCtrl+X"), popup::Icon::Glyph(popup::glyph::CUT)),
+                with_icon(own(CMD_COPY, "복사\tCtrl+C"), popup::Icon::Glyph(popup::glyph::COPY)),
+                with_icon(own(CMD_COPY_PATH, "경로 복사\tCtrl+Shift+C"), popup::Icon::Glyph(popup::glyph::LINK)),
             ]);
+            v.push(with_icon(own(CMD_LOCKS, "사용 중인 프로세스 찾기"), popup::Icon::Glyph(popup::glyph::LOCK)));
             if !structural {
                 v.extend([
                     SEP,
                     with_icon(own(CMD_RENAME, "이름 바꾸기\tF2"), popup::Icon::Stock(SIID_RENAME)),
                     with_icon(own(CMD_DELETE, "삭제\tDel"), popup::Icon::Stock(SIID_DELETE)),
+                    SEP,
+                    with_icon(own(CMD_RENAME_MANY, "여러 이름 바꾸기\tShift+F2"), popup::Icon::Glyph(popup::glyph::RENAME_MANY)),
                 ]);
             }
             v
@@ -2505,10 +2588,10 @@ impl App {
         };
         match (&seq, &shell) {
             (Ok(_), Some(Ok(_))) => {}
-            (Ok(_), None) => top.extend([SEP, own(CMD_MORE, "더 많은 옵션…")]),
+            (Ok(_), None) => top.extend([SEP, with_icon(own(CMD_MORE, "더 많은 옵션…"), popup::Icon::Glyph(popup::glyph::MORE))]),
             (Ok(_), Some(Err(e))) => {
                 self.set_note(&t, format!("셸 메뉴 실패: {e}"));
-                top.extend([SEP, own(CMD_RETRY, "더 많은 옵션 (다시 시도)…")]);
+                top.extend([SEP, with_icon(own(CMD_RETRY, "더 많은 옵션 (다시 시도)…"), popup::Icon::Glyph(popup::glyph::MORE))]);
             }
             (Err(e), _) => self.set_note(&t, e.clone()),
         }
@@ -2531,6 +2614,8 @@ impl App {
             CMD_COPY => self.copy(false),
             CMD_COPY_PATH => self.copy_path(),
             CMD_RENAME => self.start_rename(),
+            CMD_RENAME_MANY => self.rename_many(),
+            CMD_LOCKS => self.find_locks(),
             CMD_DELETE => self.delete(false),
             CMD_PASTE => self.paste(),
             CMD_NEW_FOLDER => self.new_folder(),
@@ -2810,7 +2895,7 @@ impl App {
                         a.push_undo(Undo::Create(path_dir.join(&name)));
                         a.reload(&t, After { select: vec![name], rename: true, ..Default::default() });
                     }
-                    Err(e) => a.set_note(&t, format!("만들 수 없음: {e}")),
+                    Err(e) => a.show_error(&t, "새로 만들지 못했습니다.", &e),
                 }
             });
         });
@@ -2917,10 +3002,10 @@ impl App {
                 }
                 _ => None,
             };
-            let note = match &r {
-                Ok(true) => String::new(),
-                Ok(false) => "취소됨".into(),
-                Err(e) => format!("실패: {e}"),
+            let (note, err) = match r {
+                Ok(true) => (String::new(), None),
+                Ok(false) => ("취소됨".into(), None),
+                Err(e) => (String::new(), Some(e)),
             };
             post(move |a| {
                 if let Some(t) = a.find(id) {
@@ -2928,6 +3013,9 @@ impl App {
                         a.push_undo(u);
                     }
                     a.set_note(&t, note);
+                    if let Some(e) = err {
+                        a.show_error(&t, "파일을 옮기거나 복사하지 못했습니다.", &e);
+                    }
                     a.reload(&t, After::default());
                 }
             });
@@ -2960,7 +3048,7 @@ impl App {
                         *t.note.borrow_mut() = String::new();
                     }
                     Ok((false, _)) => *t.note.borrow_mut() = "취소됨".into(),
-                    Err(e) => *t.note.borrow_mut() = format!("실패: {e}"),
+                    Err(e) => a.show_error(&t, "작업을 완료하지 못했습니다.", &e),
                 }
                 a.reload(&t, after);
             });
@@ -2996,6 +3084,18 @@ impl App {
                             from.file_name().map(|n| n.to_string_lossy().into_owned()).unwrap_or_default();
                         shell::rename(&to, &name, Some(hwnd))
                     }
+                    Undo::RenameMany { pairs } => {
+                        let back: Vec<(PathBuf, String)> = pairs
+                            .iter()
+                            .rev()
+                            .map(|(from, to)| (to.clone(), from.file_name().map(|n| n.to_string_lossy().into_owned()).unwrap_or_default()))
+                            .collect();
+                        let (done, errors) = tools::apply_renames(&back, hwnd);
+                        match errors.first() {
+                            Some(e) => Err(io::Error::other(e.clone())),
+                            None => Ok(!done.is_empty()),
+                        }
+                    }
                     Undo::Move { pairs } => {
                         let mut by_parent: HashMap<PathBuf, Vec<PathBuf>> = HashMap::new();
                         for (from, now) in pairs {
@@ -3027,7 +3127,7 @@ impl App {
                         a.reload(&t, After::default());
                     }
                     Ok(false) => a.set_note(&t, "되돌리기 취소됨".into()),
-                    Err(e) => a.set_note(&t, format!("되돌릴 수 없음: {e}")),
+                    Err(e) => a.show_error(&t, "되돌리지 못했습니다.", &e),
                 }
             });
         });
@@ -3738,7 +3838,23 @@ fn dnd_hover(row: Option<usize>) {
     app(|a| a.set_drop_row(row));
 }
 
+/// Release builds have no console, so a panic would end the app silently: record it.
+fn log_panics() {
+    let default = std::panic::take_hook();
+    std::panic::set_hook(Box::new(move |info| {
+        if let Some(dir) = shell::roaming_appdata().ok().map(|d| d.join("Fast Explorer")) {
+            use std::io::Write;
+            let _ = std::fs::create_dir_all(&dir);
+            if let Ok(mut f) = std::fs::OpenOptions::new().create(true).append(true).open(dir.join("crash.log")) {
+                let _ = writeln!(f, "{info}\n{}\n", std::backtrace::Backtrace::force_capture());
+            }
+        }
+        default(info);
+    }));
+}
+
 fn main() -> Result<(), slint::PlatformError> {
+    log_panics();
     let ui = AppWindow::new()?;
     let tab_model = Rc::new(VecModel::default());
     ui.set_tabs(ModelRc::from(tab_model.clone()));
@@ -3756,6 +3872,8 @@ fn main() -> Result<(), slint::PlatformError> {
     SHOW_EXT.store(show_ext, Relaxed);
     ui.set_show_hidden(show_hidden);
     ui.set_show_ext(show_ext);
+    ui.set_app_version(update::CURRENT.into());
+    ui.set_auto_update(update::auto_enabled());
     ui.set_this_pc_path(THIS_PC.into());
     start_icon_worker();
 
@@ -3851,6 +3969,8 @@ fn main() -> Result<(), slint::PlatformError> {
         a.delete(false);
     }));
     ui.on_view_changed(|| app(|a| a.view_changed()));
+    ui.on_auto_update_changed(|| app(|a| update::set_auto(a.ui().get_auto_update())));
+    ui.on_check_update(|| app(|a| a.check_update()));
     ui.on_suggest(|t| app(|a| a.suggest(&t)));
     ui.on_suggest_cancel(|| app(|a| a.cancel_suggest()));
     ui.on_key(|e, in_list| {
@@ -3860,6 +3980,9 @@ fn main() -> Result<(), slint::PlatformError> {
     let start = std::env::args().nth(1).unwrap_or_else(|| r"C:\".into());
     let start = if is_this_pc_name(&start) { PathBuf::from(THIS_PC) } else { PathBuf::from(start) };
     app(|a| a.new_tab(start));
+    if update::auto_due() {
+        app(|a| a.check_update());
+    }
     ui.run()
 }
 
