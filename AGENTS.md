@@ -40,6 +40,8 @@ cargo fmt                               # 포맷 (rustfmt 설정 파일은 없�
 | `ui/src/tools.rs` | 여러 이름 바꾸기 / 사용 중인 프로세스 대화상자 (`RenameWindow`, `LocksWindow`) |
 | `shell-host/` | 셸 확장 메뉴를 격리 실행하는 별도 프로세스 |
 | `index-service/` | MFT/USN 색인 Windows 서비스와 설치/제거 CLI |
+| `ui/src/update.rs` | `latest.json` 업데이트 확인/다운로드 (Windows 내장 `curl.exe`) |
+| `installer/` | Inno Setup 스크립트 `fex.iss`와 `build.ps1`. 릴리스는 `.github/workflows/release.yml` |
 
 ## 아키텍처 규칙
 
@@ -56,6 +58,7 @@ cargo fmt                               # 포맷 (rustfmt 설정 파일은 없�
 - 인덱스 서비스는 LocalSystem으로 실행되며 설치 사용자 SID만 파이프에 허용합니다. 이 경계를 넓히지 마세요.
 - 앱은 **Program Files 아래에 있을 때만** 인덱스 서비스 설치를 승격 제안합니다. 사용자가 덮어쓸 수 있는 실행 파일을 관리자로 실행하면 권한 상승 취약점이 됩니다.
 - 인덱스 서비스는 클라이언트가 나열할 수 없는 폴더의 결과를 숨깁니다(`visible_to_client`). 이 필터를 우회하는 경로를 만들지 마세요.
+- 업데이트는 자기 저장소의 `releases/download/` 주소만 받고, 설치 전에 항상 사용자에게 묻습니다. 무음 설치를 추가하지 마세요.
 - 셸 확장은 신뢰할 수 없는 코드입니다. 반드시 `fex-shell-host`에서 실행하고, 응답이 없으면 교체하는 `HANG_LIMIT`(10초) 동작을 유지하세요.
 
 ## 프로토콜

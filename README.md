@@ -101,6 +101,24 @@ cargo build --release
 
 배포할 때는 세 실행 파일을 같은 폴더에 두세요. `fex.exe`는 옆에서 `fex-shell-host.exe`를 찾아 실행하고, 인덱스 서비스 설치도 같은 폴더의 `fex-index.exe`를 사용합니다.
 
+## 설치 파일
+
+```powershell
+.\installer\build.ps1   # 릴리스 빌드 후 target\installer\FastExplorer-Setup-<버전>.exe 생성 (Inno Setup 6 필요)
+```
+
+- `%ProgramFiles%\Fast Explorer`에 설치하며 관리자 권한이 필요합니다(인덱스 서비스 보안 조건).
+- 설치 옵션: 바탕 화면 바로 가기, 인덱스 서비스(기본 켜짐), **기본 파일 탐색기로 사용**(기본 꺼짐).
+- 기본 탐색기로 사용하면 폴더·드라이브를 여는 기본 동작이 Fast Explorer로 바뀝니다. Win+E와 작업 표시줄의 탐색기 아이콘은 계속 Explorer를 엽니다. 제거하면 원래대로 돌아갑니다.
+- 제거하면 인덱스 서비스도 함께 제거됩니다.
+
+## 배포와 업데이트
+
+- 워크스페이스 `Cargo.toml`의 `version`이 유일한 버전입니다. 올린 뒤 같은 이름의 태그(`v0.2.0`)를 push하면 `.github/workflows/release.yml`이 설치 파일과 `latest.json`을 GitHub 릴리스로 올립니다.
+- 앱은 하루 한 번 백그라운드에서 `releases/latest/download/latest.json`을 확인하고, 새 버전이 있으면 설치할지 묻습니다. 동의하면 설치 파일을 받아 실행하고 앱을 닫습니다. 묻지 않고 설치하지 않습니다.
+- 빈 공간이나 내 PC에서 우클릭 → "업데이트 확인…"으로 직접 확인할 수 있습니다.
+- 업데이트 확인은 저장소가 public이어야 동작합니다. 코드 서명이 아직 없어 설치 시 SmartScreen 경고가 뜹니다.
+
 ## 실행
 
 ```powershell
@@ -147,6 +165,7 @@ cargo test -p fex-index --test live -- --ignored
 
 - `favorites.txt` — 즐겨찾기 폴더 목록 (한 줄에 하나)
 - `view.txt` — 숨김 항목/확장자 표시 설정
+- `update.txt` — 마지막 업데이트 확인 시각. `auto=0` 줄이 있으면 자동 확인을 끔
 
 ## 라이선스
 

@@ -1,0 +1,36 @@
+# Push a tag matching the workspace version (e.g. v0.2.0) to publish a release with the installer
+# and latest.json, which the app's update check reads.
+name: release
+on:
+  push:
+    tags: ["v*"]
+
+permissions:
+  contents: write
+
+jobs:
+  release:
+    runs-on: windows-latest
+    steps:
+      - uses: actions/checkout@v4
+      - name: Version must match the tag
+        shell: pwsh
+        run: |
+          $ver = (Select-String -Path Cargo.toml -Pattern '^version\s*=\s*"([^"]+)"').Matches[0].Groups[1].Value
+          if ("v$ver" -ne "${{ github.ref_name }}") { throw "Cargo.toml version $ver does not match tag ${{ github.ref_name }}" }
+          "VERSION=$ver" >> $env:GITHUB_ENV
+      - name: Install Inno Setup
+        run: choco install innosetup --no-progress -y
+      - name: Build installer
+        shell: pwsh
+        run: ./installer/build.ps1
+      # Code signing goes here once a certificate is available (fex*.exe and the installer).
+      - name: Publish
+        shell: pwsh
+        env:
+          GH_TOKEN: ${{ github.token }}
+        run: |
+          $setup = "FastExplorer-Setup-$env:VERSION.exe"
+          $url = "https://github.com/${{ github.repository }}/releases/download/${{ github.ref_name }}/$setup"
+          @{ version = $env:VERSION; url = $url } | ConvertTo-Json | Set-Content target/installer/latest.json -Encoding utf8NoBOM
+          gh release create "${{ github.ref_name }}" "target/installer/$setup" target/installer/latest.json --title "Fast Explorer $env:VERSION" --generate-notes

@@ -205,6 +205,35 @@ component KebabButton inherits Rectangle {
     }
 }
 
+// The settings (gear) button, drawn with the Windows icon font like our native menus.
+component GearButton inherits Rectangle {
+    callback clicked;
+
+    horizontal-stretch: 0;
+    width: 30px;
+    height: 30px;
+    border-radius: 6px;
+    background: touch.has-hover ? Palette.foreground.transparentize(0.9) : transparent;
+
+    Text {
+        text: "\u{E713}";
+        font-family: "Segoe MDL2 Assets";
+        font-size: 15px;
+        color: Palette.foreground;
+        horizontal-alignment: center;
+        vertical-alignment: center;
+    }
+
+    touch := TouchArea {
+        width: 100%;
+        height: 100%;
+        mouse-cursor: pointer;
+        clicked => {
+            root.clicked();
+        }
+    }
+}
+
 // A radio-like row used inside the search-options menu (no nested popup needed).
 component OptionChoice inherits Rectangle {
     in property <string> text;
@@ -618,6 +647,11 @@ export component AppWindow inherits Window {
     // 0 = 단순 목록, 1 = 트리 구조.
     in-out property <int> search-view: 0;
     private property <bool> search-options-open: false;
+    private property <bool> settings-open: false;
+    // Settings panel: update check.
+    in property <string> app-version;
+    in-out property <bool> auto-update;
+    in property <string> update-status;
     in-out property <bool> show-hidden;
     in-out property <bool> show-ext;
     in property <bool> can-back;
@@ -657,6 +691,8 @@ export component AppWindow inherits Window {
     callback navigate(string);
     callback search(string);
     callback search-options-changed();
+    callback auto-update-changed();
+    callback check-update();
     callback row-expand(int);
     callback back();
     callback forward();
@@ -714,6 +750,7 @@ export component AppWindow inherits Window {
 
     public function focus-list() {
         root.search-options-open = false;
+        root.settings-open = false;
         root.address-editing = false;
         root.address-text = root.path;
         root.close-suggestions();
@@ -1163,6 +1200,12 @@ export component AppWindow inherits Window {
                             checked <=> root.show-ext;
                             changed checked => {
                                 root.view-changed();
+                            }
+                        }
+                        settings-button := GearButton {
+                            clicked => {
+                                root.search-options-open = false;
+                                root.settings-open = !root.settings-open;
                             }
                         }
                     }
@@ -1698,6 +1741,82 @@ export component AppWindow inherits Window {
                     clicked => {
                         root.search-view = 1;
                         root.search-options-changed();
+                    }
+                }
+            }
+        }
+
+        // Settings: a small panel anchored under the gear button.
+        if root.settings-open: TouchArea {
+            width: 100%;
+            height: 100%;
+            clicked => {
+                root.settings-open = false;
+            }
+        }
+
+        if root.settings-open: Rectangle {
+            x: max(8px, min(settings-button.absolute-position.x + settings-button.width - 268px, root.width - 268px));
+            y: settings-button.absolute-position.y + settings-button.height + 4px;
+            width: 260px;
+            height: settings-panel.preferred-height + 20px;
+            background: Palette.background;
+            border-radius: 6px;
+            border-width: 1px;
+            border-color: Palette.foreground.transparentize(0.65);
+            drop-shadow-blur: 12px;
+            drop-shadow-color: #00000038;
+            drop-shadow-offset-y: 4px;
+            clip: true;
+
+            settings-panel := VerticalLayout {
+                padding: 10px;
+                spacing: 5px;
+
+                Text { text: "설정"; font-size: 13px; color: Palette.foreground; }
+                Rectangle { height: 2px; }
+
+                Text { text: "보기"; font-size: 12px; color: root.dim; }
+                CheckBox {
+                    text: "숨긴 항목 표시";
+                    checked <=> root.show-hidden;
+                    changed checked => {
+                        root.view-changed();
+                    }
+                }
+                CheckBox {
+                    text: "파일 확장명 표시";
+                    checked <=> root.show-ext;
+                    changed checked => {
+                        root.view-changed();
+                    }
+                }
+
+                Rectangle { height: 4px; }
+
+                Text { text: "업데이트"; font-size: 12px; color: root.dim; }
+                Text { text: "Fast Explorer v" + root.app-version; color: Palette.foreground; }
+                CheckBox {
+                    text: "자동으로 업데이트 확인 (하루 한 번)";
+                    checked <=> root.auto-update;
+                    changed checked => {
+                        root.auto-update-changed();
+                    }
+                }
+                HorizontalLayout {
+                    spacing: 8px;
+                    Button {
+                        text: "지금 확인";
+                        clicked => {
+                            root.check-update();
+                        }
+                    }
+                    Text {
+                        text: root.update-status;
+                        color: root.dim;
+                        vertical-alignment: center;
+                        wrap: word-wrap;
+                        horizontal-stretch: 1;
                     }
                 }
             }

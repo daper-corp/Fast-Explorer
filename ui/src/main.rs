@@ -44,6 +44,7 @@ mod dnd;
 mod popup;
 mod tools;
 mod tree;
+mod update;
 
 /// Gives one of our menu commands an icon.
 fn with_icon(o: Own, icon: popup::Icon) -> Own {
@@ -2362,6 +2363,42 @@ impl App {
         });
     }
 
+    /// Looks for a newer release on a worker thread and shows the outcome in the settings panel.
+    /// Installing always asks first and runs the installer (UAC); we quit so it can replace files.
+    fn check_update(&self) {
+        let hwnd = self.hwnd();
+        self.ui().set_update_status("확인 중…".into());
+        thread::spawn(move || {
+            let found = update::check();
+            update::mark_checked();
+            let status = match &found {
+                Ok(Some(rel)) => format!("새 버전 v{} 있음", rel.version),
+                Ok(None) => "최신 버전입니다".to_string(),
+                Err(e) => format!("확인 실패: {e}"),
+            };
+            post(move |a| a.ui().set_update_status(status.into()));
+            let Ok(Some(rel)) = found else { return };
+            let ask = format!(
+                "새 버전 v{}을(를) 사용할 수 있습니다 (현재 v{}).\n\n지금 다운로드하여 설치할까요? 설치 중 Fast Explorer가 닫힙니다.",
+                rel.version,
+                update::CURRENT
+            );
+            if !shell::confirm(hwnd, &ask) {
+                return;
+            }
+            post(|a| a.ui().set_update_status("다운로드 중…".into()));
+            match update::download(&rel).map_err(io::Error::other).and_then(|f| shell::open(&f)) {
+                Ok(()) => post(|_| {
+                    let _ = slint::quit_event_loop();
+                }),
+                Err(e) => {
+                    post(|a| a.ui().set_update_status("업데이트 실패".into()));
+                    shell::alert(hwnd, &format!("업데이트 실패: {e}"));
+                }
+            }
+        });
+    }
+
     // ---------- context menus ----------
 
     fn next_seq(&self) -> u64 {
@@ -3835,6 +3872,8 @@ fn main() -> Result<(), slint::PlatformError> {
     SHOW_EXT.store(show_ext, Relaxed);
     ui.set_show_hidden(show_hidden);
     ui.set_show_ext(show_ext);
+    ui.set_app_version(update::CURRENT.into());
+    ui.set_auto_update(update::auto_enabled());
     ui.set_this_pc_path(THIS_PC.into());
     start_icon_worker();
 
@@ -3930,6 +3969,8 @@ fn main() -> Result<(), slint::PlatformError> {
         a.delete(false);
     }));
     ui.on_view_changed(|| app(|a| a.view_changed()));
+    ui.on_auto_update_changed(|| app(|a| update::set_auto(a.ui().get_auto_update())));
+    ui.on_check_update(|| app(|a| a.check_update()));
     ui.on_suggest(|t| app(|a| a.suggest(&t)));
     ui.on_suggest_cancel(|| app(|a| a.cancel_suggest()));
     ui.on_key(|e, in_list| {
@@ -3939,6 +3980,9 @@ fn main() -> Result<(), slint::PlatformError> {
     let start = std::env::args().nth(1).unwrap_or_else(|| r"C:\".into());
     let start = if is_this_pc_name(&start) { PathBuf::from(THIS_PC) } else { PathBuf::from(start) };
     app(|a| a.new_tab(start));
+    if update::auto_due() {
+        app(|a| a.check_update());
+    }
     ui.run()
 }
 
