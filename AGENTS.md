@@ -30,11 +30,14 @@ cargo fmt                               # 포맷 (rustfmt 설정 파일은 없�
 | `core/src/menu.rs` | 셸 메뉴 호스트 클라이언트와 stdio 프로토콜 |
 | `core/src/watch.rs` | `ReadDirectoryChangesW` 기반 폴더 감시 |
 | `core/src/icons.rs` | 셸 아이콘 → RGBA |
+| `core/src/rename.rs` | 일괄 이름 바꾸기 규칙과 미리보기 계획 (순수 로직, 단위 테스트 있음) |
+| `core/src/locks.rs` | Restart Manager로 파일을 잡은 프로세스 찾기/종료 |
 | `ui/` (`fex`) | Slint 앱. `app.slint` + `src/main.rs`, `tree.rs`, `dnd.rs`, `popup.rs` |
 | `ui/src/main.rs` | `App`/`Tab`/`Rows` 상태, 이벤트 배선, 검색·탭·파일 작업, Win32 창 처리 |
 | `ui/src/tree.rs` | 검색 결과 폴더 트리와 가상화된 행 순서 |
 | `ui/src/dnd.rs` | OLE `IDropSource`/`IDropTarget` |
 | `ui/src/popup.rs` | Win32 팝업 메뉴 (자체 명령 + 셸 항목) |
+| `ui/src/tools.rs` | 여러 이름 바꾸기 / 사용 중인 프로세스 대화상자 (`RenameWindow`, `LocksWindow`) |
 | `shell-host/` | 셸 확장 메뉴를 격리 실행하는 별도 프로세스 |
 | `index-service/` | MFT/USN 색인 Windows 서비스와 설치/제거 CLI |
 

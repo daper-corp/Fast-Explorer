@@ -2,7 +2,9 @@
 
 pub mod icons;
 pub mod index;
+pub mod locks;
 pub mod menu;
+pub mod rename;
 pub mod search;
 pub mod shell;
 pub mod watch;

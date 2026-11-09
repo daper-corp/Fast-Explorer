@@ -42,6 +42,7 @@ use windows::Win32::UI::WindowsAndMessaging::{
 
 mod dnd;
 mod popup;
+mod tools;
 mod tree;
 
 /// Gives one of our menu commands an icon.
@@ -68,6 +69,8 @@ const CMD_RETRY: u32 = 0x800D;
 const CMD_NEW_FILE: u32 = 0x800E;
 const CMD_ADD_FAVORITE: u32 = 0x800F;
 const CMD_SEARCH_HERE: u32 = 0x8010;
+const CMD_RENAME_MANY: u32 = 0x8011;
+const CMD_LOCKS: u32 = 0x8012;
 
 /// How long a right-click waits for a shell menu that isn't prefetched yet.
 const MENU_WAIT: Duration = Duration::from_millis(150);
@@ -425,6 +428,8 @@ enum Undo {
     Move { pairs: Vec<(PathBuf, PathBuf)> },
     Copy { created: Vec<PathBuf> },
     Delete { items: Vec<shell::TrashedItem> },
+    /// `(old path, new path)` for each item of a batch rename.
+    RenameMany { pairs: Vec<(PathBuf, PathBuf)> },
 }
 
 /// Applied once the next listing of a tab is ready.
@@ -1700,6 +1705,7 @@ impl App {
             _ if ctrl && ch == 'v' => self.paste(),
             _ if ctrl && ch == 'z' && in_list => self.undo(),
             _ if is(Key::Delete) => self.delete(shift),
+            _ if is(Key::F2) && shift => self.rename_many(),
             _ if is(Key::F2) => self.start_rename(),
             _ if ctrl && ch == ' ' => {
                 if let Some(c) = t.cursor.get() {
@@ -2507,11 +2513,14 @@ impl App {
                 with_icon(own(CMD_COPY, "복사\tCtrl+C"), popup::Icon::Glyph(popup::glyph::COPY)),
                 with_icon(own(CMD_COPY_PATH, "경로 복사\tCtrl+Shift+C"), popup::Icon::Glyph(popup::glyph::LINK)),
             ]);
+            v.push(with_icon(own(CMD_LOCKS, "사용 중인 프로세스 찾기"), popup::Icon::Glyph(popup::glyph::LOCK)));
             if !structural {
                 v.extend([
                     SEP,
                     with_icon(own(CMD_RENAME, "이름 바꾸기\tF2"), popup::Icon::Stock(SIID_RENAME)),
                     with_icon(own(CMD_DELETE, "삭제\tDel"), popup::Icon::Stock(SIID_DELETE)),
+                    SEP,
+                    with_icon(own(CMD_RENAME_MANY, "여러 이름 바꾸기\tShift+F2"), popup::Icon::Glyph(popup::glyph::RENAME_MANY)),
                 ]);
             }
             v
@@ -2548,6 +2557,8 @@ impl App {
             CMD_COPY => self.copy(false),
             CMD_COPY_PATH => self.copy_path(),
             CMD_RENAME => self.start_rename(),
+            CMD_RENAME_MANY => self.rename_many(),
+            CMD_LOCKS => self.find_locks(),
             CMD_DELETE => self.delete(false),
             CMD_PASTE => self.paste(),
             CMD_NEW_FOLDER => self.new_folder(),
@@ -3015,6 +3026,18 @@ impl App {
                         let name =
                             from.file_name().map(|n| n.to_string_lossy().into_owned()).unwrap_or_default();
                         shell::rename(&to, &name, Some(hwnd))
+                    }
+                    Undo::RenameMany { pairs } => {
+                        let back: Vec<(PathBuf, String)> = pairs
+                            .iter()
+                            .rev()
+                            .map(|(from, to)| (to.clone(), from.file_name().map(|n| n.to_string_lossy().into_owned()).unwrap_or_default()))
+                            .collect();
+                        let (done, errors) = tools::apply_renames(&back, hwnd);
+                        match errors.first() {
+                            Some(e) => Err(io::Error::other(e.clone())),
+                            None => Ok(!done.is_empty()),
+                        }
                     }
                     Undo::Move { pairs } => {
                         let mut by_parent: HashMap<PathBuf, Vec<PathBuf>> = HashMap::new();

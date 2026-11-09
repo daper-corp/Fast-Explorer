@@ -43,6 +43,8 @@ pub mod glyph {
     pub const LINK: char = '\u{E71B}';
     pub const STAR: char = '\u{E734}';
     pub const MORE: char = '\u{E712}';
+    pub const RENAME_MANY: char = '\u{E8AC}';
+    pub const LOCK: char = '\u{E72E}';
     pub const TERMINAL: char = '\u{E756}';
 }
 
