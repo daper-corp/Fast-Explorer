@@ -379,6 +379,37 @@ component StarButton inherits Rectangle {
     }
 }
 
+// A path that keeps its end visible: when it does not fit, the start is cut behind a "…"
+// (Slint's own elide only cuts the end).
+component TailText inherits Rectangle {
+    in property <string> text;
+    in property <brush> text-color;
+    property <bool> over: full.preferred-width > self.width;
+
+    if root.over: Text {
+        x: 0px;
+        width: 12px;
+        height: root.height;
+        text: "…";
+        vertical-alignment: center;
+        color: root.text-color;
+    }
+    Rectangle {
+        x: root.over ? 12px : 0px;
+        width: root.width - self.x;
+        height: root.height;
+        clip: true;
+        full := Text {
+            x: min(0px, parent.width - self.preferred-width);
+            width: self.preferred-width;
+            height: parent.height;
+            text: root.text;
+            vertical-alignment: center;
+            color: root.text-color;
+        }
+    }
+}
+
 // One folder in the address bar; clicking it goes back up to that folder.
 component CrumbButton inherits Rectangle {
     in property <string> title;
@@ -1085,29 +1116,50 @@ export component AppWindow inherits Window {
                             }
                         }
 
-                        HorizontalLayout {
-                            padding-left: 4px;
-                            padding-right: 4px;
-                            spacing: 0px;
-                            alignment: start;
+                        // Too long: crumbs keep their full width and the row slides left so the
+                        // last folders stay visible; the cut-off start shows as "…".
+                        property <bool> crumbs-over: crumb-row.preferred-width > self.width;
+                        if crumbs-over: Text {
+                            x: 8px;
+                            width: 14px;
+                            height: parent.height;
+                            text: "…";
+                            vertical-alignment: center;
+                            color: root.dim;
+                        }
+                        Rectangle {
+                            x: crumbs-over ? 22px : 0px;
+                            width: parent.width - self.x;
+                            height: parent.height;
+                            clip: true;
 
-                            for c[i] in root.crumbs: HorizontalLayout {
+                            crumb-row := HorizontalLayout {
+                                x: min(0px, parent.width - self.preferred-width);
+                                width: self.preferred-width;
+                                height: parent.height;
+                                padding-left: 4px;
+                                padding-right: 4px;
                                 spacing: 0px;
                                 alignment: start;
-                                // Inner box is 28px tall; crumbs are 22px, so center both the same way.
-                                padding-top: 3px;
-                                if i > 0: Text {
-                                    width: 14px;
-                                    height: 22px;
-                                    text: "\\";
-                                    horizontal-alignment: center;
-                                    vertical-alignment: center;
-                                    color: root.dim;
-                                }
-                                CrumbButton {
-                                    title: c.title;
-                                    clicked => {
-                                        root.place-open(c.path);
+
+                                for c[i] in root.crumbs: HorizontalLayout {
+                                    spacing: 0px;
+                                    alignment: start;
+                                    // Inner box is 28px tall; crumbs are 22px, so center both the same way.
+                                    padding-top: 3px;
+                                    if i > 0: Text {
+                                        width: 14px;
+                                        height: 22px;
+                                        text: "\\";
+                                        horizontal-alignment: center;
+                                        vertical-alignment: center;
+                                        color: root.dim;
+                                    }
+                                    CrumbButton {
+                                        title: c.title;
+                                        clicked => {
+                                            root.place-open(c.path);
+                                        }
                                     }
                                 }
                             }
@@ -1506,12 +1558,10 @@ export component AppWindow inherits Window {
                                             }
                                         }
                                     }
-                                    if root.search-mode: Text {
+                                    if root.search-mode: TailText {
                                         width: root.w-location;
                                         text: r.location;
-                                        overflow: elide;
-                                        vertical-alignment: center;
-                                        color: root.dim;
+                                        text-color: root.dim;
                                     }
                                     Rectangle {
                                         width: root.w-date;
@@ -1646,12 +1696,10 @@ export component AppWindow inherits Window {
                             vertical-alignment: center;
                             color: Palette.foreground;
                         }
-                        Text {
+                        TailText {
                             horizontal-stretch: 1;
                             text: s.detail;
-                            overflow: elide;
-                            vertical-alignment: center;
-                            color: root.dim;
+                            text-color: root.dim;
                         }
                     }
 
