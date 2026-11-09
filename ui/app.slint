@@ -654,6 +654,11 @@ export component AppWindow inherits Window {
     in property <int> active-tab;
     in property <[Row]> rows;
     in property <string> path;
+    // How far the address-bar crumbs are scrolled back from their right end (mouse wheel).
+    private property <length> crumb-scroll: 0px;
+    changed path => {
+        self.crumb-scroll = 0px;
+    }
     in property <[Crumb]> crumbs;
     // The "내 PC" view: drives and user folders instead of a folder listing.
     in property <bool> this-pc;
@@ -1117,9 +1122,12 @@ export component AppWindow inherits Window {
                         }
 
                         // Too long: crumbs keep their full width and the row slides left so the
-                        // last folders stay visible; the cut-off start shows as "…".
+                        // last folders stay visible; the cut-off start shows as "…". The wheel
+                        // scrolls back toward the start; a new folder starts at the right end.
                         property <bool> crumbs-over: crumb-row.preferred-width > self.width;
-                        if crumbs-over: Text {
+                        property <length> crumb-max: max(0px, crumb-row.preferred-width - crumb-clip.width);
+                        property <length> crumb-offset: min(root.crumb-scroll, crumb-max);
+                        if crumbs-over && crumb-offset < crumb-max: Text {
                             x: 8px;
                             width: 14px;
                             height: parent.height;
@@ -1127,38 +1135,53 @@ export component AppWindow inherits Window {
                             vertical-alignment: center;
                             color: root.dim;
                         }
-                        Rectangle {
+                        crumb-clip := Rectangle {
                             x: crumbs-over ? 22px : 0px;
                             width: parent.width - self.x;
                             height: parent.height;
                             clip: true;
 
-                            crumb-row := HorizontalLayout {
-                                x: min(0px, parent.width - self.preferred-width);
-                                width: self.preferred-width;
-                                height: parent.height;
-                                padding-left: 4px;
-                                padding-right: 4px;
-                                spacing: 0px;
-                                alignment: start;
+                            TouchArea {
+                                mouse-cursor: text;
+                                clicked => {
+                                    root.focus-address();
+                                }
+                                scroll-event(e) => {
+                                    if (!crumbs-over) {
+                                        return reject;
+                                    }
+                                    // Wheel up / left reveals the start of the path.
+                                    root.crumb-scroll = max(0px, min(crumb-max, crumb-offset + (e.delta-x != 0 ? e.delta-x : e.delta-y)));
+                                    accept
+                                }
 
-                                for c[i] in root.crumbs: HorizontalLayout {
+                                crumb-row := HorizontalLayout {
+                                    x: min(0px, crumb-clip.width - self.preferred-width) + crumb-offset;
+                                    width: self.preferred-width;
+                                    height: parent.height;
+                                    padding-left: 4px;
+                                    padding-right: 4px;
                                     spacing: 0px;
                                     alignment: start;
-                                    // Inner box is 28px tall; crumbs are 22px, so center both the same way.
-                                    padding-top: 3px;
-                                    if i > 0: Text {
-                                        width: 14px;
-                                        height: 22px;
-                                        text: "\\";
-                                        horizontal-alignment: center;
-                                        vertical-alignment: center;
-                                        color: root.dim;
-                                    }
-                                    CrumbButton {
-                                        title: c.title;
-                                        clicked => {
-                                            root.place-open(c.path);
+
+                                    for c[i] in root.crumbs: HorizontalLayout {
+                                        spacing: 0px;
+                                        alignment: start;
+                                        // Inner box is 28px tall; crumbs are 22px, so center both the same way.
+                                        padding-top: 3px;
+                                        if i > 0: Text {
+                                            width: 14px;
+                                            height: 22px;
+                                            text: "\\";
+                                            horizontal-alignment: center;
+                                            vertical-alignment: center;
+                                            color: root.dim;
+                                        }
+                                        CrumbButton {
+                                            title: c.title;
+                                            clicked => {
+                                                root.place-open(c.path);
+                                            }
                                         }
                                     }
                                 }
@@ -1237,22 +1260,6 @@ export component AppWindow inherits Window {
                         cross-axis-alignment: center;
                         Rectangle {
                             horizontal-stretch: 1;
-                        }
-                        CheckBox {
-                            text: "숨긴 항목";
-                            visible: !root.this-pc || root.search-mode;
-                            checked <=> root.show-hidden;
-                            changed checked => {
-                                root.view-changed();
-                            }
-                        }
-                        CheckBox {
-                            text: "파일 확장명";
-                            visible: !root.this-pc || root.search-mode;
-                            checked <=> root.show-ext;
-                            changed checked => {
-                                root.view-changed();
-                            }
                         }
                         settings-button := GearButton {
                             clicked => {
