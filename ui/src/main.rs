@@ -1549,9 +1549,10 @@ impl App {
         if self.rubber_last.replace(key) == key {
             return;
         }
+        // Selection is indexed by entry, not row: hidden items and collapsed tree nodes have no row.
         let base = self.rubber_base.borrow();
-        let mut want = vec![false; n];
-        if base.len() == n {
+        let mut want = vec![false; t.rows.selected.borrow().len()];
+        if base.len() == want.len() {
             want.copy_from_slice(&base);
         }
         if !empty {
