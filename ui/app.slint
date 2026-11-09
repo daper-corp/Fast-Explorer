@@ -750,6 +750,9 @@ export component AppWindow inherits Window {
     // Explorer leaves a small strip on each side of the rows where a drag starts a
     // rubber-band selection instead of hitting a row.
     private property <length> list-margin: 6px;
+    // Always-blank strips above/below the rows and right of the last column.
+    private property <length> list-vmargin: 4px;
+    private property <length> blank-right: 24px;
     private property <brush> dim: Palette.foreground.transparentize(0.4);
     // Tab drag-reorder state: the tab being dragged and the slot it would land in.
     private property <int> tab-drag-from: -1;
@@ -979,7 +982,7 @@ export component AppWindow inherits Window {
                     address := LineEdit {
                         x: 1px;
                         y: 1px;
-                        width: parent.width - 2px;
+                        width: parent.width - 32px;
                         height: parent.height - 2px;
                         text <=> root.address-text;
                         edited(t) => {
@@ -1030,7 +1033,7 @@ export component AppWindow inherits Window {
                     if !root.address-editing: Rectangle {
                         x: 1px;
                         y: 1px;
-                        width: parent.width - 2px;
+                        width: parent.width - 32px;
                         height: parent.height - 2px;
                         border-radius: 5px;
                         background: Palette.background;
@@ -1054,8 +1057,11 @@ export component AppWindow inherits Window {
                             for c[i] in root.crumbs: HorizontalLayout {
                                 spacing: 0px;
                                 alignment: start;
+                                // Inner box is 28px tall; crumbs are 22px, so center both the same way.
+                                padding-top: 3px;
                                 if i > 0: Text {
                                     width: 14px;
+                                    height: 22px;
                                     text: "\\";
                                     horizontal-alignment: center;
                                     vertical-alignment: center;
@@ -1070,11 +1076,14 @@ export component AppWindow inherits Window {
                             }
                         }
                     }
-                }
-                StarButton {
-                    active: root.favorite-active;
-                    clicked => {
-                        root.favorite-toggle();
+                    StarButton {
+                        x: parent.width - 31px;
+                        y: 0px;
+                        height: parent.height;
+                        active: root.favorite-active;
+                        clicked => {
+                            root.favorite-toggle();
+                        }
                     }
                 }
                 search-box := LineEdit {
@@ -1167,7 +1176,7 @@ export component AppWindow inherits Window {
                             name-header := HeaderCell {
                                 width: root.w-name;
                                 min-column-width: 120px;
-                                max-column-width: max(120px, header-bar.width - root.list-margin - 7px);
+                                max-column-width: max(120px, header-bar.width - root.list-margin - 7px - root.blank-right);
                                 fit-width: max(120px, measure-name.preferred-width + 34px);
                                 text: "이름";
                                 sorted: root.sort-column == 0;
@@ -1185,7 +1194,7 @@ export component AppWindow inherits Window {
                             if root.search-mode: location-header := HeaderCell {
                                 width: root.w-location;
                                 min-column-width: 90px;
-                                max-column-width: max(90px, header-bar.width - root.list-margin - 7px - root.w-name);
+                                max-column-width: max(90px, header-bar.width - root.list-margin - 7px - root.blank-right - root.w-name);
                                 fit-width: max(90px, measure-location.preferred-width + 24px);
                                 text: "위치";
                                 resize(w) => {
@@ -1198,7 +1207,7 @@ export component AppWindow inherits Window {
                             date-header := HeaderCell {
                                 width: root.w-date;
                                 min-column-width: 100px;
-                                max-column-width: max(100px, header-bar.width - root.list-margin - 7px - root.w-name - (root.search-mode ? root.w-location : 0px));
+                                max-column-width: max(100px, header-bar.width - root.list-margin - 7px - root.blank-right - root.w-name - (root.search-mode ? root.w-location : 0px));
                                 fit-width: max(100px, measure-date.preferred-width + 22px);
                                 text: root.this-pc && !root.search-mode ? "여유 공간" : "수정한 날짜";
                                 sorted: root.sort-column == 1;
@@ -1216,7 +1225,7 @@ export component AppWindow inherits Window {
                             kind-header := HeaderCell {
                                 width: root.w-kind;
                                 min-column-width: 70px;
-                                max-column-width: max(70px, header-bar.width - root.list-margin - 7px - root.w-name - (root.search-mode ? root.w-location : 0px) - root.w-date);
+                                max-column-width: max(70px, header-bar.width - root.list-margin - 7px - root.blank-right - root.w-name - (root.search-mode ? root.w-location : 0px) - root.w-date);
                                 fit-width: max(70px, measure-kind.preferred-width + 22px);
                                 text: "유형";
                                 sorted: root.sort-column == 2;
@@ -1234,7 +1243,7 @@ export component AppWindow inherits Window {
                             size-header := HeaderCell {
                                 width: root.w-size;
                                 min-column-width: 70px;
-                                max-column-width: max(70px, header-bar.width - root.list-margin - 7px - root.w-name - (root.search-mode ? root.w-location : 0px) - root.w-date - root.w-kind);
+                                max-column-width: max(70px, header-bar.width - root.list-margin - 7px - root.blank-right - root.w-name - (root.search-mode ? root.w-location : 0px) - root.w-date - root.w-kind);
                                 fit-width: max(70px, measure-size.preferred-width + 22px);
                                 text: root.this-pc && !root.search-mode ? "전체 용량" : "크기";
                                 sorted: root.sort-column == 3;
@@ -1295,19 +1304,28 @@ export component AppWindow inherits Window {
                             }
                             moved => {
                                 if root.rubber-on {
-                                    root.rubber-move(blank-touch.pressed-y, blank-touch.mouse-y);
+                                    root.rubber-move(blank-touch.pressed-y - root.list-vmargin, blank-touch.mouse-y - root.list-vmargin);
                                 }
                             }
 
                         list := ListView {
                             x: root.list-margin;
+                            y: root.list-vmargin;
                             width: parent.width - 2 * root.list-margin;
-                            height: 100%;
+                            height: parent.height - 2 * root.list-vmargin;
                             for r[i] in root.rows: Rectangle {
                                 height: root.row-height;
-                                background: i == root.drop-row ? Palette.accent-background.transparentize(0.6) : r.selected ? Palette.accent-background.transparentize(list-focus.has-focus ? 0.75 : 0.88) : row-touch.has-hover ? Palette.foreground.transparentize(0.95) : transparent;
+                                // Columns end before the right edge; what lies beyond acts as blank space.
+                                private property <length> cols-w: min(
+                                    parent.width - root.blank-right,
+                                    6px + root.w-name + (root.search-mode ? root.w-location : 0px) + root.w-date + root.w-kind + root.w-size);
+                                Rectangle {
+                                    width: parent.cols-w;
+                                    background: i == root.drop-row ? Palette.accent-background.transparentize(0.6) : r.selected ? Palette.accent-background.transparentize(list-focus.has-focus ? 0.75 : 0.88) : row-touch.has-hover ? Palette.foreground.transparentize(0.95) : transparent;
+                                }
 
                                 row-touch := TouchArea {
+                                    width: parent.cols-w;
                                     pointer-event(e) => {
                                         if e.kind == PointerEventKind.down && e.button == PointerEventButton.left {
                                             list-focus.focus();
@@ -1396,8 +1414,12 @@ export component AppWindow inherits Window {
                                         vertical-alignment: center;
                                         color: Palette.foreground;
                                     }
-                                    if r.editing: LineEdit {
-                                        width: max(0px, root.w-name - 22px - tree-indent);
+                                    if r.editing: Rectangle {
+                                      width: max(0px, root.w-name - 22px - tree-indent);
+                                      // Fix the field to the row's height (LineEdit's own minimum is taller).
+                                      LineEdit {
+                                        width: 100%;
+                                        height: 100%;
                                         text: r.name;
                                         init => {
                                             self.focus();
@@ -1418,6 +1440,7 @@ export component AppWindow inherits Window {
                                                 root.rename-done(self.text, true);
                                             }
                                         }
+                                    }
                                     }
                                     if root.search-mode: Text {
                                         width: root.w-location;

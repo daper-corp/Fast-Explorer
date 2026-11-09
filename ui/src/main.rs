@@ -441,6 +441,12 @@ struct After {
     auto: bool,
 }
 
+/// When `target` is an ancestor of `from`, selects the child of `target` we are coming from.
+fn came_from(from: &Path, target: &Path) -> Option<After> {
+    let name = from.strip_prefix(target).ok()?.components().next()?;
+    Some(After { select: vec![name.as_os_str().to_string_lossy().into_owned()], ..Default::default() })
+}
+
 /// How search results are matched and shown for one tab.
 #[derive(Clone, Copy, PartialEq, Eq, Debug)]
 struct SearchOptions {
@@ -760,7 +766,17 @@ impl App {
     fn sync_tabs(&self) {
         let titles: Vec<TabInfo> =
             self.tabs.borrow().iter().map(|t| TabInfo { title: t.title().into() }).collect();
-        self.tab_model.set_vec(titles);
+        // Update in place when the count is unchanged: replacing the model would rebuild the
+        // tab elements and drop the pointer grab of a tab drag in progress.
+        if titles.len() == self.tab_model.row_count() {
+            for (i, t) in titles.into_iter().enumerate() {
+                if self.tab_model.row_data(i).is_none_or(|o| o.title != t.title) {
+                    self.tab_model.set_row_data(i, t);
+                }
+            }
+        } else {
+            self.tab_model.set_vec(titles);
+        }
     }
 
     /// Pushes the active tab's path, history, sort and status to the window.
@@ -1781,7 +1797,8 @@ impl App {
         let pos = t.hist_pos.get();
         if pos > 0 {
             let p = t.history.borrow()[pos - 1].clone();
-            self.navigate(&t, p, Hist::Go(pos - 1), None);
+            let after = came_from(&t.cwd.borrow(), &p);
+            self.navigate(&t, p, Hist::Go(pos - 1), after);
         }
     }
 
@@ -1790,7 +1807,8 @@ impl App {
         let pos = t.hist_pos.get();
         let next = t.history.borrow().get(pos + 1).cloned();
         if let Some(p) = next {
-            self.navigate(&t, p, Hist::Go(pos + 1), None);
+            let after = came_from(&t.cwd.borrow(), &p);
+            self.navigate(&t, p, Hist::Go(pos + 1), after);
         }
     }
 
