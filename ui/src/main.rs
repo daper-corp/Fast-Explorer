@@ -2410,8 +2410,9 @@ impl App {
         t.cursor.set(Some(i));
         self.update_status(&t);
         let at = cursor_pos();
-        // Run the menu's modal loop outside the pointer-event handler.
-        let _ = slint::invoke_from_event_loop(move || app(|a| a.context_menu(false, at)));
+        // Run the menu's modal loop outside the pointer-event handler, after a repaint
+        // so the selection highlight is visible while the menu is open.
+        slint::Timer::single_shot(Duration::from_millis(30), move || app(|a| a.context_menu(false, at)));
     }
 
     fn blank_pressed(&self, right: bool, ctrl: bool) {
@@ -3781,7 +3782,23 @@ fn dnd_hover(row: Option<usize>) {
     app(|a| a.set_drop_row(row));
 }
 
+/// Release builds have no console, so a panic would end the app silently: record it.
+fn log_panics() {
+    let default = std::panic::take_hook();
+    std::panic::set_hook(Box::new(move |info| {
+        if let Some(dir) = shell::roaming_appdata().ok().map(|d| d.join("Fast Explorer")) {
+            use std::io::Write;
+            let _ = std::fs::create_dir_all(&dir);
+            if let Ok(mut f) = std::fs::OpenOptions::new().create(true).append(true).open(dir.join("crash.log")) {
+                let _ = writeln!(f, "{info}\n{}\n", std::backtrace::Backtrace::force_capture());
+            }
+        }
+        default(info);
+    }));
+}
+
 fn main() -> Result<(), slint::PlatformError> {
+    log_panics();
     let ui = AppWindow::new()?;
     let tab_model = Rc::new(VecModel::default());
     ui.set_tabs(ModelRc::from(tab_model.clone()));
