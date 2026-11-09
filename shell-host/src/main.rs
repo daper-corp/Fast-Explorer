@@ -12,6 +12,9 @@ use fex_core::menu::{MenuItem, Request};
 use windows::Win32::Foundation::{ERROR_CANCELLED, E_FAIL, HWND, LPARAM, LRESULT, WPARAM};
 use windows::Win32::System::LibraryLoader::GetModuleHandleW;
 use windows::Win32::System::Ole::OleInitialize;
+use windows::Win32::Graphics::Gdi::{
+    BI_RGB, BITMAP, BITMAPINFO, BITMAPINFOHEADER, DIB_RGB_COLORS, GetDC, GetDIBits, GetObjectW, HBITMAP, ReleaseDC,
+};
 use windows::Win32::UI::Shell::Common::ITEMIDLIST;
 use windows::Win32::UI::Shell::{
     CMF_NORMAL, CMINVOKECOMMANDINFOEX, GCS_VERBW, IContextMenu, IContextMenu2, IContextMenu3, ILFindLastID, ILFree,
@@ -19,7 +22,7 @@ use windows::Win32::UI::Shell::{
 };
 use windows::Win32::UI::WindowsAndMessaging::{
     CreatePopupMenu, CreateWindowExW, DefWindowProcW, DestroyMenu, DispatchMessageW, GetMenuItemCount,
-    GetMenuItemInfoW, GetMessageW, HMENU, MENUITEMINFOW, MFS_DEFAULT, MFS_DISABLED, MFT_SEPARATOR, MIIM_FTYPE,
+    GetMenuItemInfoW, GetMessageW, HMENU, MENUITEMINFOW, MFS_DEFAULT, MFS_DISABLED, MFT_SEPARATOR, MIIM_BITMAP, MIIM_FTYPE,
     MIIM_ID, MIIM_STATE, MIIM_STRING, MIIM_SUBMENU, MSG, PostMessageW, PostQuitMessage, RegisterClassW,
     SW_SHOWNORMAL, TranslateMessage, WINDOW_EX_STYLE, WM_APP, WM_INITMENUPOPUP, WNDCLASSW, WS_POPUP,
 };
@@ -242,7 +245,7 @@ unsafe fn read_items(cm: &IContextMenu, menu: HMENU, depth: u8, out: &mut Vec<Me
     for pos in 0..count {
         let mut mii = MENUITEMINFOW {
             cbSize: size_of::<MENUITEMINFOW>() as u32,
-            fMask: MIIM_ID | MIIM_FTYPE | MIIM_STATE | MIIM_SUBMENU | MIIM_STRING,
+            fMask: MIIM_ID | MIIM_BITMAP | MIIM_FTYPE | MIIM_STATE | MIIM_SUBMENU | MIIM_STRING,
             ..Default::default()
         };
         if unsafe { GetMenuItemInfoW(menu, pos, true, &mut mii) }.is_err() {
@@ -278,11 +281,54 @@ unsafe fn read_items(cm: &IContextMenu, menu: HMENU, depth: u8, out: &mut Vec<Me
             default: mii.fState.0 & MFS_DEFAULT.0 != 0,
             submenu,
             verb,
+            icon: if separator { String::new() } else { unsafe { bitmap_icon(mii.hbmpItem) } },
             label,
         });
         if submenu && depth < 4 {
             unsafe { read_items(cm, mii.hSubMenu, depth + 1, out) };
         }
+    }
+}
+
+/// An item bitmap (what Explorer draws left of the text) as [`MenuItem::icon`]; empty if the item
+/// has none, or only one of the HBMMENU_* pseudo handles.
+unsafe fn bitmap_icon(bmp: HBITMAP) -> String {
+    if (bmp.0 as usize) <= 16 {
+        return String::new();
+    }
+    unsafe {
+        let mut bm = BITMAP::default();
+        if GetObjectW(bmp.into(), size_of::<BITMAP>() as i32, Some((&raw mut bm).cast())) == 0 {
+            return String::new();
+        }
+        let (w, h) = (bm.bmWidth, bm.bmHeight.abs());
+        if w <= 0 || h <= 0 || w > 64 || h > 64 {
+            return String::new();
+        }
+        let mut info = BITMAPINFO {
+            bmiHeader: BITMAPINFOHEADER {
+                biSize: size_of::<BITMAPINFOHEADER>() as u32,
+                biWidth: w,
+                biHeight: -h,
+                biPlanes: 1,
+                biBitCount: 32,
+                biCompression: BI_RGB.0,
+                ..Default::default()
+            },
+            ..Default::default()
+        };
+        let mut px = vec![0u8; (w * h * 4) as usize];
+        let dc = GetDC(None);
+        let lines = GetDIBits(dc, bmp, 0, h as u32, Some(px.as_mut_ptr().cast()), &mut info, DIB_RGB_COLORS);
+        ReleaseDC(None, dc);
+        if lines != h {
+            return String::new();
+        }
+        // Bitmaps without an alpha channel are drawn opaque.
+        if px.chunks_exact(4).all(|p| p[3] == 0) {
+            px.chunks_exact_mut(4).for_each(|p| p[3] = 255);
+        }
+        MenuItem::pack_icon(w as u32, h as u32, &px)
     }
 }
 

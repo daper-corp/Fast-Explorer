@@ -31,7 +31,7 @@ use windows::Win32::Graphics::Gdi::{
 use windows::Win32::UI::Controls::MARGINS;
 use windows::Win32::UI::Input::KeyboardAndMouse::{GetAsyncKeyState, VK_LBUTTON};
 use windows::Win32::UI::Shell::{
-    DefSubclassProc, SetWindowSubclass, SIID_DELETE, SIID_DOCNOASSOC, SIID_FOLDER, SIID_LINK, SIID_RENAME,
+    DefSubclassProc, SetWindowSubclass, SIID_DELETE, SIID_DOCNOASSOC, SIID_FOLDER, SIID_RENAME,
     SIID_SETTINGS,
 };
 use windows::Win32::UI::WindowsAndMessaging::{
@@ -954,6 +954,23 @@ impl App {
         ui.set_fit_date(fit.date.into());
         ui.set_fit_kind(fit.kind.into());
         ui.set_fit_size(fit.size.into());
+    }
+
+    /// A failed file operation: the status note plus a message box, so it cannot go unnoticed.
+    fn show_error(&self, t: &Tab, what: &str, e: &io::Error) {
+        // ERROR_SHARING_VIOLATION / ERROR_LOCK_VIOLATION: another process holds the file.
+        let busy = matches!(e.raw_os_error(), Some(32 | 33));
+        let mut text = format!("{what}\n\n{e}");
+        if busy {
+            text.push_str("\n\n다른 프로세스가 사용 중인 파일이나 폴더일 수 있습니다. 해당 프로그램을 닫고 다시 시도하세요.");
+        }
+        self.alert(text);
+        self.set_note(t, format!("실패: {e}"));
+    }
+
+    fn alert(&self, text: String) {
+        let hwnd = self.hwnd();
+        thread::spawn(move || shell::alert(hwnd, &text));
     }
 
     fn set_note(&self, t: &Tab, note: String) {
@@ -2450,22 +2467,22 @@ impl App {
 
         let mut top = if background {
             vec![
-                Own { disabled: !shell::clipboard_has_files(), ..own(CMD_PASTE, "붙여넣기\tCtrl+V") },
+                with_icon(Own { disabled: !shell::clipboard_has_files(), ..own(CMD_PASTE, "붙여넣기\tCtrl+V") }, popup::Icon::Glyph(popup::glyph::PASTE)),
                 with_icon(own(CMD_NEW_FOLDER, "새 폴더\tCtrl+Shift+N"), popup::Icon::Stock(SIID_FOLDER)),
                 with_icon(own(CMD_NEW_FILE, "새 텍스트 문서"), popup::Icon::Stock(SIID_DOCNOASSOC)),
-                own(CMD_REFRESH, "새로 고침\tF5"),
+                with_icon(own(CMD_REFRESH, "새로 고침\tF5"), popup::Icon::Glyph(popup::glyph::REFRESH)),
                 SEP,
-                own(CMD_SEARCH_HERE, "이 폴더에서 검색"),
-                with_icon(own(CMD_ADD_FAVORITE, "즐겨찾기에 추가"), popup::Icon::Stock(SIID_LINK)),
+                with_icon(own(CMD_SEARCH_HERE, "이 폴더에서 검색"), popup::Icon::Glyph(popup::glyph::SEARCH)),
+                with_icon(own(CMD_ADD_FAVORITE, "즐겨찾기에 추가"), popup::Icon::Glyph(popup::glyph::STAR)),
             ]
         } else if at_this_pc(&t) {
             vec![
                 Own { default: true, ..own(CMD_OPEN, "열기\tEnter") },
-                own(CMD_OPEN_TAB, "새 탭에서 열기"),
-                own(CMD_SEARCH_HERE, "이 폴더에서 검색"),
-                own(CMD_ADD_FAVORITE, "즐겨찾기에 추가"),
+                with_icon(own(CMD_OPEN_TAB, "새 탭에서 열기"), popup::Icon::Glyph(popup::glyph::NEW_TAB)),
+                with_icon(own(CMD_SEARCH_HERE, "이 폴더에서 검색"), popup::Icon::Glyph(popup::glyph::SEARCH)),
+                with_icon(own(CMD_ADD_FAVORITE, "즐겨찾기에 추가"), popup::Icon::Glyph(popup::glyph::STAR)),
                 SEP,
-                own(CMD_COPY_PATH, "경로 복사\tCtrl+Shift+C"),
+                with_icon(own(CMD_COPY_PATH, "경로 복사\tCtrl+Shift+C"), popup::Icon::Glyph(popup::glyph::LINK)),
             ]
         } else {
             let sel = t.rows.selection();
@@ -2480,15 +2497,15 @@ impl App {
             if let [i] = sel[..]
                 && t.rows.is_dir(i)
             {
-                v.push(with_icon(own(CMD_OPEN_TAB, "새 탭에서 열기"), popup::Icon::Path(paths[0].clone())));
-                v.push(own(CMD_SEARCH_HERE, "이 폴더에서 검색"));
-                v.push(with_icon(own(CMD_ADD_FAVORITE, "즐겨찾기에 추가"), popup::Icon::Stock(SIID_LINK)));
+                v.push(with_icon(own(CMD_OPEN_TAB, "새 탭에서 열기"), popup::Icon::Glyph(popup::glyph::NEW_TAB)));
+                v.push(with_icon(own(CMD_SEARCH_HERE, "이 폴더에서 검색"), popup::Icon::Glyph(popup::glyph::SEARCH)));
+                v.push(with_icon(own(CMD_ADD_FAVORITE, "즐겨찾기에 추가"), popup::Icon::Glyph(popup::glyph::STAR)));
             }
             v.extend([
                 SEP,
-                own(CMD_CUT, "잘라내기\tCtrl+X"),
-                own(CMD_COPY, "복사\tCtrl+C"),
-                own(CMD_COPY_PATH, "경로 복사\tCtrl+Shift+C"),
+                with_icon(own(CMD_CUT, "잘라내기\tCtrl+X"), popup::Icon::Glyph(popup::glyph::CUT)),
+                with_icon(own(CMD_COPY, "복사\tCtrl+C"), popup::Icon::Glyph(popup::glyph::COPY)),
+                with_icon(own(CMD_COPY_PATH, "경로 복사\tCtrl+Shift+C"), popup::Icon::Glyph(popup::glyph::LINK)),
             ]);
             if !structural {
                 v.extend([
@@ -2505,10 +2522,10 @@ impl App {
         };
         match (&seq, &shell) {
             (Ok(_), Some(Ok(_))) => {}
-            (Ok(_), None) => top.extend([SEP, own(CMD_MORE, "더 많은 옵션…")]),
+            (Ok(_), None) => top.extend([SEP, with_icon(own(CMD_MORE, "더 많은 옵션…"), popup::Icon::Glyph(popup::glyph::MORE))]),
             (Ok(_), Some(Err(e))) => {
                 self.set_note(&t, format!("셸 메뉴 실패: {e}"));
-                top.extend([SEP, own(CMD_RETRY, "더 많은 옵션 (다시 시도)…")]);
+                top.extend([SEP, with_icon(own(CMD_RETRY, "더 많은 옵션 (다시 시도)…"), popup::Icon::Glyph(popup::glyph::MORE))]);
             }
             (Err(e), _) => self.set_note(&t, e.clone()),
         }
@@ -2810,7 +2827,7 @@ impl App {
                         a.push_undo(Undo::Create(path_dir.join(&name)));
                         a.reload(&t, After { select: vec![name], rename: true, ..Default::default() });
                     }
-                    Err(e) => a.set_note(&t, format!("만들 수 없음: {e}")),
+                    Err(e) => a.show_error(&t, "새로 만들지 못했습니다.", &e),
                 }
             });
         });
@@ -2917,10 +2934,10 @@ impl App {
                 }
                 _ => None,
             };
-            let note = match &r {
-                Ok(true) => String::new(),
-                Ok(false) => "취소됨".into(),
-                Err(e) => format!("실패: {e}"),
+            let (note, err) = match r {
+                Ok(true) => (String::new(), None),
+                Ok(false) => ("취소됨".into(), None),
+                Err(e) => (String::new(), Some(e)),
             };
             post(move |a| {
                 if let Some(t) = a.find(id) {
@@ -2928,6 +2945,9 @@ impl App {
                         a.push_undo(u);
                     }
                     a.set_note(&t, note);
+                    if let Some(e) = err {
+                        a.show_error(&t, "파일을 옮기거나 복사하지 못했습니다.", &e);
+                    }
                     a.reload(&t, After::default());
                 }
             });
@@ -2960,7 +2980,7 @@ impl App {
                         *t.note.borrow_mut() = String::new();
                     }
                     Ok((false, _)) => *t.note.borrow_mut() = "취소됨".into(),
-                    Err(e) => *t.note.borrow_mut() = format!("실패: {e}"),
+                    Err(e) => a.show_error(&t, "작업을 완료하지 못했습니다.", &e),
                 }
                 a.reload(&t, after);
             });
@@ -3027,7 +3047,7 @@ impl App {
                         a.reload(&t, After::default());
                     }
                     Ok(false) => a.set_note(&t, "되돌리기 취소됨".into()),
-                    Err(e) => a.set_note(&t, format!("되돌릴 수 없음: {e}")),
+                    Err(e) => a.show_error(&t, "되돌리지 못했습니다.", &e),
                 }
             });
         });

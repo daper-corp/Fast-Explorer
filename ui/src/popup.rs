@@ -4,23 +4,46 @@ use std::path::PathBuf;
 
 use fex_core::menu::MenuItem;
 use windows::Win32::Foundation::HWND;
-use windows::Win32::Graphics::Gdi::{DeleteObject, HBITMAP, HGDIOBJ};
+use windows::Win32::Graphics::Gdi::{
+    ANTIALIASED_QUALITY, BITMAPINFO, BITMAPINFOHEADER, BI_RGB, CLIP_DEFAULT_PRECIS, CreateCompatibleDC, CreateDIBSection,
+    CreateFontW, DEFAULT_CHARSET, DIB_RGB_COLORS, DT_CENTER, DT_NOCLIP, DT_SINGLELINE, DT_VCENTER, DeleteDC, DeleteObject,
+    DrawTextW, FW_NORMAL, GdiFlush, HBITMAP, HGDIOBJ, OUT_DEFAULT_PRECIS, SelectObject, SetBkMode, SetTextColor,
+    TRANSPARENT,
+};
+use windows::Win32::Foundation::{COLORREF, RECT};
 use windows::Win32::Storage::FileSystem::FILE_ATTRIBUTE_NORMAL;
 use windows::Win32::UI::Shell::{
     SHFILEINFOW, SHGFI_ICON, SHGFI_SMALLICON, SHGSI_ICON, SHGSI_SMALLICON, SHGetFileInfoW, SHGetStockIconInfo,
     SHSTOCKICONID, SHSTOCKICONINFO,
 };
 use windows::Win32::UI::WindowsAndMessaging::{
-    AppendMenuW, CreatePopupMenu, DestroyMenu, GetIconInfo, HMENU, ICONINFO, MENU_ITEM_FLAGS, MF_BYCOMMAND,
-    MF_GRAYED, MF_POPUP, MF_SEPARATOR, MF_STRING, SetMenuDefaultItem, SetMenuItemBitmaps, TPM_RETURNCMD,
-    TPM_RIGHTBUTTON, TrackPopupMenuEx,
+    AppendMenuW, CreatePopupMenu, DestroyMenu, GetIconInfo, GetMenuItemCount, GetSystemMetrics, HMENU, ICONINFO,
+    MENU_ITEM_FLAGS, MENUITEMINFOW, MF_BYCOMMAND, MF_GRAYED, MF_POPUP, MF_SEPARATOR, MF_STRING, MIIM_BITMAP,
+    SM_CXSMICON, SetMenuDefaultItem, SetMenuItemBitmaps, SetMenuItemInfoW, TPM_RETURNCMD, TPM_RIGHTBUTTON,
+    TrackPopupMenuEx,
 };
-use windows::core::{HSTRING, PCWSTR};
+use windows::core::{HSTRING, PCWSTR, w};
 
-/// An icon for one of our menu items: a shell stock icon, or the icon of a file/folder.
+/// An icon for one of our menu items: a shell stock icon, the icon of a file/folder, or a glyph
+/// of the Segoe icon font (the same symbols Windows 11 menus use for cut/copy/paste).
 pub enum Icon {
     Stock(SHSTOCKICONID),
     Path(PathBuf),
+    Glyph(char),
+}
+
+/// Segoe MDL2 Assets code points.
+pub mod glyph {
+    pub const CUT: char = '\u{E8C6}';
+    pub const COPY: char = '\u{E8C8}';
+    pub const PASTE: char = '\u{E77F}';
+    pub const REFRESH: char = '\u{E72C}';
+    pub const SEARCH: char = '\u{E721}';
+    pub const NEW_TAB: char = '\u{E8A7}';
+    pub const LINK: char = '\u{E71B}';
+    pub const STAR: char = '\u{E734}';
+    pub const MORE: char = '\u{E712}';
+    pub const TERMINAL: char = '\u{E756}';
 }
 
 /// One of our own commands. Ids sit above the shell's range (1..=0x7FFF); id 0 is a separator.
@@ -63,7 +86,7 @@ pub fn show(hwnd: isize, at: (i32, i32), top: &[Own], items: &[MenuItem], bottom
         root.add_own(top, &mut bitmaps);
         root.pending_sep = true;
         let seen = top.iter().chain(bottom).filter(|o| o.id != 0).map(|o| plain(o.label)).collect();
-        root = add_shell(root, items, seen);
+        root = add_shell(root, items, seen, &mut bitmaps);
         root.pending_sep = true;
         root.add_own(bottom, &mut bitmaps);
         let flags = (TPM_RETURNCMD | TPM_RIGHTBUTTON).0;
@@ -82,6 +105,7 @@ pub fn show(hwnd: isize, at: (i32, i32), top: &[Own], items: &[MenuItem], bottom
 unsafe fn icon_bitmaps(icon: &Icon) -> Option<(HBITMAP, HBITMAP)> {
     unsafe {
         let hicon = match icon {
+            Icon::Glyph(_) => return None, // drawn as an alpha bitmap; see `glyph_bitmap`
             Icon::Stock(id) => {
                 let mut info =
                     SHSTOCKICONINFO { cbSize: size_of::<SHSTOCKICONINFO>() as u32, ..Default::default() };
@@ -140,6 +164,23 @@ impl Level {
         self.count += 1;
     }
 
+    /// Shows `bmp` (premultiplied-alpha) left of the item appended last.
+    unsafe fn set_last_bitmap(&self, bmp: Option<HBITMAP>, bitmaps: &mut Vec<(HBITMAP, HBITMAP)>) {
+        let Some(bmp) = bmp else { return };
+        unsafe {
+            let pos = (GetMenuItemCount(Some(self.menu)) - 1).max(0) as u32;
+            let mii = MENUITEMINFOW {
+                cbSize: size_of::<MENUITEMINFOW>() as u32,
+                fMask: MIIM_BITMAP,
+                hbmpItem: bmp,
+                ..Default::default()
+            };
+            let _ = SetMenuItemInfoW(self.menu, pos, true, &mii);
+        }
+        // Freed with the other bitmaps; the mask slot is unused.
+        bitmaps.push((bmp, HBITMAP::default()));
+    }
+
     unsafe fn add_own(&mut self, items: &[Own], bitmaps: &mut Vec<(HBITMAP, HBITMAP)>) {
         for o in items {
             if o.id == 0 {
@@ -151,7 +192,9 @@ impl Level {
                 if o.default {
                     let _ = SetMenuDefaultItem(self.menu, o.id, 0);
                 }
-                if let Some(icon) = &o.icon
+                if let Some(Icon::Glyph(g)) = &o.icon {
+                    self.set_last_bitmap(glyph_bitmap(*g), bitmaps);
+                } else if let Some(icon) = &o.icon
                     && let Some((color, mask)) = icon_bitmaps(icon)
                 {
                     let usable = (!mask.is_invalid()).then_some(mask);
@@ -165,7 +208,12 @@ impl Level {
 
 /// Rebuilds the host's flattened item list (depth-first) as nested menus under `root`.
 /// Top-level items whose label is already in `seen` (ours, or an earlier shell item) are dropped.
-unsafe fn add_shell(root: Level, items: &[MenuItem], mut seen: std::collections::HashSet<String>) -> Level {
+unsafe fn add_shell(
+    root: Level,
+    items: &[MenuItem],
+    mut seen: std::collections::HashSet<String>,
+    bitmaps: &mut Vec<(HBITMAP, HBITMAP)>,
+) -> Level {
     // ponytail: label-based dedup is a heuristic (same text = same command); good enough for
     // menus, revisit if an extension legitimately repeats a label.
     let mut stack = vec![root];
@@ -198,9 +246,11 @@ unsafe fn add_shell(root: Level, items: &[MenuItem], mut seen: std::collections:
                     continue;
                 };
                 stack[d].append(flags | MF_POPUP, sub.0 as usize, &it.label);
+                stack[d].set_last_bitmap(shell_item_bitmap(it), bitmaps);
                 stack.push(Level { menu: sub, pending_sep: false, count: 0 });
             } else {
                 stack[d].append(flags, it.id as usize, &it.label);
+                stack[d].set_last_bitmap(shell_item_bitmap(it), bitmaps);
                 if it.default {
                     let _ = SetMenuDefaultItem(stack[d].menu, it.id, 0);
                 }
@@ -208,6 +258,107 @@ unsafe fn add_shell(root: Level, items: &[MenuItem], mut seen: std::collections:
         }
     }
     stack[0]
+}
+
+/// The bitmap the shell extension supplied for `it`; failing that, a symbol for well-known items.
+unsafe fn shell_item_bitmap(it: &MenuItem) -> Option<HBITMAP> {
+    if let Some((w, h, px)) = it.icon_pixels() {
+        return unsafe { dib(w as i32, h as i32, &px) };
+    }
+    let label = it.label.to_lowercase();
+    if it.verb.contains("terminal") || label.contains("터미널") || label.contains("terminal") {
+        return unsafe { glyph_bitmap(glyph::TERMINAL) };
+    }
+    None
+}
+
+/// A 32-bit top-down DIB holding premultiplied BGRA `px`.
+unsafe fn dib(w: i32, h: i32, px: &[u8]) -> Option<HBITMAP> {
+    unsafe {
+        let info = BITMAPINFO {
+            bmiHeader: BITMAPINFOHEADER {
+                biSize: size_of::<BITMAPINFOHEADER>() as u32,
+                biWidth: w,
+                biHeight: -h,
+                biPlanes: 1,
+                biBitCount: 32,
+                biCompression: BI_RGB.0,
+                ..Default::default()
+            },
+            ..Default::default()
+        };
+        let mut bits = std::ptr::null_mut();
+        let bmp = CreateDIBSection(None, &info, DIB_RGB_COLORS, &mut bits, None, 0).ok()?;
+        if bits.is_null() || px.len() != (w * h * 4) as usize {
+            let _ = DeleteObject(HGDIOBJ(bmp.0));
+            return None;
+        }
+        std::ptr::copy_nonoverlapping(px.as_ptr(), bits.cast::<u8>(), px.len());
+        Some(bmp)
+    }
+}
+
+/// Renders a Segoe icon-font glyph as a small dark alpha bitmap.
+unsafe fn glyph_bitmap(ch: char) -> Option<HBITMAP> {
+    unsafe {
+        let size = GetSystemMetrics(SM_CXSMICON).clamp(16, 64);
+        let dc = CreateCompatibleDC(None);
+        if dc.is_invalid() {
+            return None;
+        }
+        let info = BITMAPINFO {
+            bmiHeader: BITMAPINFOHEADER {
+                biSize: size_of::<BITMAPINFOHEADER>() as u32,
+                biWidth: size,
+                biHeight: -size,
+                biPlanes: 1,
+                biBitCount: 32,
+                biCompression: BI_RGB.0,
+                ..Default::default()
+            },
+            ..Default::default()
+        };
+        let mut bits = std::ptr::null_mut();
+        let Ok(bmp) = CreateDIBSection(Some(dc), &info, DIB_RGB_COLORS, &mut bits, None, 0) else {
+            let _ = DeleteDC(dc);
+            return None;
+        };
+        if bits.is_null() {
+            let _ = DeleteObject(HGDIOBJ(bmp.0));
+            let _ = DeleteDC(dc);
+            return None;
+        }
+        let old = SelectObject(dc, HGDIOBJ(bmp.0));
+        // White on black: the coverage ends up in every channel. Segoe MDL2 Assets ships with
+        // Windows 10 and 11.
+        let font = CreateFontW(
+            -(size * 7 / 8), 0, 0, 0, FW_NORMAL.0 as i32, 0, 0, 0, DEFAULT_CHARSET, OUT_DEFAULT_PRECIS,
+            CLIP_DEFAULT_PRECIS, ANTIALIASED_QUALITY, 0, w!("Segoe MDL2 Assets"),
+        );
+        let prev = SelectObject(dc, HGDIOBJ(font.0));
+        SetBkMode(dc, TRANSPARENT);
+        SetTextColor(dc, COLORREF(0x00FF_FFFF));
+        let mut text: Vec<u16> = ch.to_string().encode_utf16().collect();
+        let mut rc = RECT { left: 0, top: 0, right: size, bottom: size };
+        let drawn = DrawTextW(dc, &mut text, &mut rc, DT_CENTER | DT_VCENTER | DT_SINGLELINE | DT_NOCLIP) > 0;
+        SelectObject(dc, prev);
+        let _ = DeleteObject(HGDIOBJ(font.0));
+        let _ = GdiFlush();
+        let px = std::slice::from_raw_parts_mut(bits.cast::<u8>(), (size * size * 4) as usize);
+        const FG: u32 = 0x3C; // dark gray, like the menu text
+        for p in px.chunks_exact_mut(4) {
+            let a = p[1] as u32; // coverage (green channel)
+            let c = (FG * a / 255) as u8; // premultiplied
+            p.copy_from_slice(&[c, c, c, a as u8]);
+        }
+        SelectObject(dc, old);
+        let _ = DeleteDC(dc);
+        if !drawn {
+            let _ = DeleteObject(HGDIOBJ(bmp.0));
+            return None;
+        }
+        Some(bmp)
+    }
 }
 
 #[cfg(test)]

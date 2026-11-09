@@ -1331,12 +1331,18 @@ export component AppWindow inherits Window {
                                     if root.search-mode: Rectangle {
                                         width: 14px;
                                         height: 100%;
-                                        Text {
-                                            text: !r.expandable ? "" : r.expanded ? "▾" : "▸";
-                                            font-size: 9px;
-                                            horizontal-alignment: center;
-                                            vertical-alignment: center;
-                                            color: root.dim;
+                                        // Drawn as a path: the glyph is missing from some UI fonts.
+                                        if r.expandable: Path {
+                                            x: (parent.width - 8px) / 2;
+                                            y: (parent.height - 8px) / 2;
+                                            width: 8px;
+                                            height: 8px;
+                                            viewbox-width: 8;
+                                            viewbox-height: 8;
+                                            fill: transparent;
+                                            stroke: root.dim;
+                                            stroke-width: 1.2px;
+                                            commands: r.expanded ? "M 0.5 2.5 L 4 6 L 7.5 2.5" : "M 2.5 0.5 L 6 4 L 2.5 7.5";
                                         }
                                         if r.expandable: TouchArea {
                                             clicked => {

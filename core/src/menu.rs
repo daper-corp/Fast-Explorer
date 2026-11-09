@@ -34,6 +34,8 @@ pub struct MenuItem {
     pub submenu: bool,
     /// Canonical verb ("open", "properties", ...) when the handler reports one.
     pub verb: String,
+    /// The item's bitmap as `WxH:` plus hex BGRA (premultiplied), or empty. See [`MenuItem::icon_pixels`].
+    pub icon: String,
     /// Menu text, with `&` accelerator markers.
     pub label: String,
 }
@@ -45,11 +47,12 @@ impl MenuItem {
             .filter(|f| f.0)
             .map(|f| f.1)
             .collect();
-        format!("{}\t{}\t{}\t{}\t{}", self.depth, self.id, flags, one_line(&self.verb), one_line(&self.label))
+        let icon = one_line(&self.icon);
+        format!("{}\t{}\t{}\t{}\t{}\t{}", self.depth, self.id, flags, one_line(&self.verb), icon, one_line(&self.label))
     }
 
     pub fn decode(line: &str) -> Option<Self> {
-        let mut p = line.splitn(5, '\t');
+        let mut p = line.splitn(6, '\t');
         let (depth, id, flags) = (p.next()?.parse().ok()?, p.next()?.parse().ok()?, p.next()?);
         Some(MenuItem {
             depth,
@@ -59,8 +62,28 @@ impl MenuItem {
             default: flags.contains('b'),
             submenu: flags.contains('p'),
             verb: p.next()?.to_string(),
+            icon: p.next()?.to_string(),
             label: p.next()?.to_string(),
         })
+    }
+
+    /// Packs top-down premultiplied BGRA pixels into the [`MenuItem::icon`] text form.
+    pub fn pack_icon(width: u32, height: u32, bgra: &[u8]) -> String {
+        let mut out = format!("{width}x{height}:");
+        out.extend(bgra.iter().map(|b| format!("{b:02x}")));
+        out
+    }
+
+    /// The icon's `(width, height, BGRA pixels)`, if the item has a well-formed one.
+    pub fn icon_pixels(&self) -> Option<(u32, u32, Vec<u8>)> {
+        let (dims, hex) = self.icon.split_once(':')?;
+        let (w, h) = dims.split_once('x')?;
+        let (w, h): (u32, u32) = (w.parse().ok()?, h.parse().ok()?);
+        if w == 0 || h == 0 || w > 64 || h > 64 || hex.len() != (w * h * 8) as usize {
+            return None;
+        }
+        let px = (0..hex.len()).step_by(2).map(|i| u8::from_str_radix(hex.get(i..i + 2)?, 16).ok()).collect::<Option<Vec<u8>>>()?;
+        Some((w, h, px))
     }
 }
 
@@ -333,5 +356,11 @@ mod tests {
         let item = MenuItem { depth: 1, id: 5, submenu: true, verb: "x".into(), label: "&Send to\tCtrl".into(), ..Default::default() };
         let back = MenuItem::decode(&item.encode()).unwrap();
         assert_eq!((back.depth, back.id, back.submenu, back.label.as_str()), (1, 5, true, "&Send to Ctrl"));
+        assert!(back.icon_pixels().is_none());
+        let px: Vec<u8> = (0..16).collect();
+        let item = MenuItem { icon: MenuItem::pack_icon(2, 2, &px), label: "x".into(), ..Default::default() };
+        let back = MenuItem::decode(&item.encode()).unwrap();
+        assert_eq!(back.icon_pixels(), Some((2, 2, px)));
+        assert!(MenuItem { icon: "2x2:00".into(), ..Default::default() }.icon_pixels().is_none());
     }
 }

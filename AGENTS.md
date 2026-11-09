@@ -57,7 +57,7 @@ cargo fmt                               # 포맷 (rustfmt 설정 파일은 없�
 
 ## 프로토콜
 
-- **셸 메뉴**: 호스트 stdin/stdout에 한 줄에 하나의 요청, 탭 구분 필드입니다. 요청/응답 형식은 `core/src/menu.rs` 상단 주석과 `shell-host/src/main.rs`에 있습니다. 양쪽을 함께 바꾸고 `shell-host/tests/protocol.rs`로 검증하세요.
+- **셸 메뉴**: 호스트 stdin/stdout에 한 줄에 하나의 요청, 탭 구분 필드입니다. 요청/응답 형식은 `core/src/menu.rs` 상단 주석과 `shell-host/src/main.rs`에 있습니다. 항목 줄은 `depth id flags verb icon label` 순서이며, `icon`은 `WxH:` + 16진 BGRA(미리 곱한 알파) 또는 빈 문자열입니다. 양쪽을 함께 바꾸고 `shell-host/tests/protocol.rs`로 검증하세요.
 - **인덱스**: 요청 `S\t<limit>\t<scope-kind>\t<scope-path>\t<query>`, 응답 첫 줄 `OK2\t<count>\t<indexing>\t<more>`. 구버전 `OK` 응답은 거부되어 재설치를 안내합니다. 형식을 바꾸면 `REPLY_OK` 버전을 올리고 `index-service/tests/live.rs`를 갱신하세요.
 - **인코딩**: 경로는 `menu::enc_path`/`dec_path`로 파이프/stdio에서 안전하게 주고받습니다. 탭·개행이 들어가는 필드는 반드시 이스케이프하세요.
 
