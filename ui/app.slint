@@ -728,6 +728,9 @@ export component AppWindow inherits Window {
     callback search(string);
     callback search-options-changed();
     callback auto-update-changed();
+    in-out property <string> home-path;
+    callback home-changed(string);
+    callback home-use-current();
     callback check-update();
     callback row-expand(int);
     callback back();
@@ -1844,6 +1847,33 @@ export component AppWindow inherits Window {
                     checked <=> root.show-ext;
                     changed checked => {
                         root.view-changed();
+                    }
+                }
+
+                Rectangle { height: 4px; }
+
+                Text { text: "기본 폴더 (시작·새 탭)"; font-size: 12px; color: root.dim; }
+                home-edit := LineEdit {
+                    text <=> root.home-path;
+                    placeholder-text: "C:\\ (비우면 기본값)";
+                    edited(text) => {
+                        root.home-changed(text);
+                    }
+                }
+                HorizontalLayout {
+                    spacing: 8px;
+                    Button {
+                        text: "현재 폴더로";
+                        clicked => {
+                            root.home-use-current();
+                        }
+                    }
+                    Button {
+                        text: "초기화";
+                        clicked => {
+                            root.home-path = "";
+                            root.home-changed("");
+                        }
                     }
                 }
 

@@ -579,6 +579,8 @@ impl Tab {
 struct App {
     ui: slint::Weak<AppWindow>,
     tabs: RefCell<Vec<Rc<Tab>>>,
+    /// Folders of recently closed tabs, newest last (Ctrl+Shift+T).
+    closed: RefCell<Vec<PathBuf>>,
     tab_model: Rc<VecModel<TabInfo>>,
     active: Cell<usize>,
     next_id: Cell<u64>,
@@ -720,6 +722,12 @@ impl App {
         }
         let closed = self.tabs.borrow_mut().remove(i);
         closed.epoch.fetch_add(1, SeqCst);
+        {
+            let mut recent = self.closed.borrow_mut();
+            recent.push(closed.cwd.borrow().clone());
+            let extra = recent.len().saturating_sub(20);
+            recent.drain(..extra);
+        }
         let active = self.active.get();
         if i == active {
             self.active.set(0);
@@ -1686,7 +1694,13 @@ impl App {
 
         // Global shortcuts (also while the address bar has focus).
         match () {
-            _ if ctrl && ch == 't' => self.new_tab(t.cwd.borrow().clone()),
+            _ if ctrl && shift && ch == 't' => {
+                let path = self.closed.borrow_mut().pop();
+                if let Some(path) = path {
+                    self.new_tab(path);
+                }
+            }
+            _ if ctrl && ch == 't' => self.new_tab(home_path()),
             _ if ctrl && (ch == 'w' || is(Key::F4)) => self.close_tab(self.active.get()),
             _ if ctrl && (is(Key::Tab) || is(Key::Backtab)) => self.cycle_tab(shift || is(Key::Backtab)),
             _ if alt && is(Key::LeftArrow) => self.back(),
@@ -3642,6 +3656,19 @@ fn view_file() -> Option<PathBuf> {
     shell::roaming_appdata().ok().map(|d| d.join("Fast Explorer").join("view.txt"))
 }
 
+/// The folder a new window/tab opens ("" = C:\), kept in `view.txt` as `home=`.
+static HOME: std::sync::Mutex<String> = std::sync::Mutex::new(String::new());
+
+/// The configured default folder, or `C:\` when unset or no longer there.
+fn home_path() -> PathBuf {
+    let home = HOME.lock().map(|h| h.clone()).unwrap_or_default();
+    if is_this_pc_name(&home) {
+        return PathBuf::from(THIS_PC);
+    }
+    let p = PathBuf::from(&home);
+    if !home.is_empty() && p.is_dir() { p } else { PathBuf::from(r"C:\") }
+}
+
 /// The view options saved by the last session. The first run takes Explorer's own settings.
 fn load_view() -> (bool, bool) {
     let (mut hidden, mut ext) = shell::explorer_view();
@@ -3650,6 +3677,10 @@ fn load_view() -> (bool, bool) {
     };
     for line in text.lines() {
         let Some((key, value)) = line.trim().split_once('=') else { continue };
+        if key.trim() == "home" {
+            *HOME.lock().unwrap() = value.trim().to_string();
+            continue;
+        }
         let on = match value.trim() {
             "1" => true,
             "0" => false,
@@ -3669,7 +3700,8 @@ fn save_view() {
     if let Some(dir) = file.parent() {
         let _ = std::fs::create_dir_all(dir);
     }
-    let text = format!("hidden={}\r\next={}", SHOW_HIDDEN.load(Relaxed) as u8, SHOW_EXT.load(Relaxed) as u8);
+    let home = HOME.lock().map(|h| h.clone()).unwrap_or_default();
+    let text = format!("hidden={}\r\next={}\r\nhome={home}", SHOW_HIDDEN.load(Relaxed) as u8, SHOW_EXT.load(Relaxed) as u8);
     let _ = std::fs::write(file, text);
 }
 
@@ -3872,6 +3904,7 @@ fn main() -> Result<(), slint::PlatformError> {
     SHOW_EXT.store(show_ext, Relaxed);
     ui.set_show_hidden(show_hidden);
     ui.set_show_ext(show_ext);
+    ui.set_home_path(HOME.lock().unwrap().clone().into());
     ui.set_app_version(update::CURRENT.into());
     ui.set_auto_update(update::auto_enabled());
     ui.set_this_pc_path(THIS_PC.into());
@@ -3886,6 +3919,7 @@ fn main() -> Result<(), slint::PlatformError> {
         let _ = a.set(App {
             ui: ui.as_weak(),
             tabs: RefCell::default(),
+            closed: RefCell::default(),
             tab_model,
             active: Cell::new(0),
             next_id: Cell::new(0),
@@ -3931,7 +3965,17 @@ fn main() -> Result<(), slint::PlatformError> {
     ui.on_refresh(|| app(|a| a.refresh()));
     ui.on_tab_select(|i| app(|a| a.select_tab(i as usize, true)));
     ui.on_tab_close(|i| app(|a| a.close_tab(i as usize)));
-    ui.on_tab_new(|| app(|a| a.new_tab(a.tab().cwd.borrow().clone())));
+    ui.on_tab_new(|| app(|a| a.new_tab(home_path())));
+    ui.on_home_changed(|text| {
+        *HOME.lock().unwrap() = text.trim().to_string();
+        save_view();
+    });
+    ui.on_home_use_current(|| app(|a| {
+        let cwd = a.tab().cwd.borrow().display().to_string();
+        *HOME.lock().unwrap() = cwd.clone();
+        save_view();
+        a.ui().set_home_path(cwd.into());
+    }));
     ui.on_tab_move(|from, to| app(|a| a.move_tab(from as usize, to as usize)));
     ui.on_favorite_toggle(|| app(|a| a.toggle_favorite()));
     ui.on_sort(|c| app(|a| a.sort(c as usize)));
@@ -3977,8 +4021,11 @@ fn main() -> Result<(), slint::PlatformError> {
         app(|a| a.key(&e.text, e.modifiers.control, e.modifiers.shift, e.modifiers.alt, in_list))
     });
 
-    let start = std::env::args().nth(1).unwrap_or_else(|| r"C:\".into());
-    let start = if is_this_pc_name(&start) { PathBuf::from(THIS_PC) } else { PathBuf::from(start) };
+    let start = match std::env::args().nth(1) {
+        Some(s) if is_this_pc_name(&s) => PathBuf::from(THIS_PC),
+        Some(s) => PathBuf::from(s),
+        None => home_path(),
+    };
     app(|a| a.new_tab(start));
     if update::auto_due() {
         app(|a| a.check_update());
