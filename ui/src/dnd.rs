@@ -140,6 +140,10 @@ impl DropTarget {
         if files.is_empty() || files.iter().any(|f| target == *f || target.starts_with(f)) {
             return None;
         }
+        // Dropping back into the source folder (blank space) cancels; Ctrl still duplicates.
+        if keys & MK_CONTROL == MODIFIERKEYS_FLAGS(0) && files.iter().all(|f| f.parent() == Some(&*target)) {
+            return None;
+        }
         let want = choose_effect(files, &target, keys);
         let effect = if allowed == DROPEFFECT_NONE || want.0 & allowed.0 != 0 {
             want
@@ -283,9 +287,6 @@ fn choose_effect(files: &[PathBuf], target: &Path, keys: MODIFIERKEYS_FLAGS) -> 
     }
     if keys & MK_SHIFT != MODIFIERKEYS_FLAGS(0) {
         return DROPEFFECT_MOVE;
-    }
-    if files.iter().all(|f| f.parent() == Some(target)) {
-        return DROPEFFECT_COPY; // same folder: a copy is the only useful result
     }
     let same_volume = files.iter().all(|f| volume(f) == volume(target));
     if same_volume { DROPEFFECT_MOVE } else { DROPEFFECT_COPY }

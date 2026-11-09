@@ -1420,32 +1420,48 @@ export component AppWindow inherits Window {
                                         color: Palette.foreground;
                                     }
                                     if r.editing: Rectangle {
-                                      width: max(0px, root.w-name - 22px - tree-indent);
-                                      // Fix the field to the row's height (LineEdit's own minimum is taller).
-                                      LineEdit {
-                                        width: 100%;
-                                        height: 100%;
-                                        text: r.name;
-                                        init => {
-                                            self.focus();
-                                            self.set-selection-offsets(0, r.stem);
-                                        }
-                                        accepted(t) => {
-                                            root.rename-done(t, true);
-                                        }
-                                        key-pressed(e) => {
-                                            if e.text == Key.Escape {
-                                                root.rename-done("", false);
-                                                return accept;
+                                        width: max(0px, root.w-name - 22px - tree-indent);
+                                        // The text stays where the name was drawn; the field's box grows
+                                        // 5px to the left of it and stops 10px short of the next column.
+                                        Rectangle {
+                                            x: -5px;
+                                            width: parent.width - 5px;
+                                            height: parent.height;
+                                            border-radius: 4px;
+                                            background: Palette.background;
+                                            border-width: 1px;
+                                            border-color: Palette.accent-background;
+                                            edit-scope := FocusScope {
+                                                key-pressed(e) => {
+                                                    if e.text == Key.Escape {
+                                                        root.rename-done("", false);
+                                                        return accept;
+                                                    }
+                                                    reject
+                                                }
+                                                edit := TextInput {
+                                                    x: 5px;
+                                                    width: parent.width - 10px;
+                                                    height: parent.height;
+                                                    text: r.name;
+                                                    color: Palette.foreground;
+                                                    vertical-alignment: center;
+                                                    single-line: true;
+                                                    init => {
+                                                        self.focus();
+                                                        self.set-selection-offsets(0, r.stem);
+                                                    }
+                                                    accepted => {
+                                                        root.rename-done(self.text, true);
+                                                    }
+                                                    changed has-focus => {
+                                                        if !self.has-focus {
+                                                            root.rename-done(self.text, true);
+                                                        }
+                                                    }
+                                                }
                                             }
-                                            reject
                                         }
-                                        changed has-focus => {
-                                            if !self.has-focus {
-                                                root.rename-done(self.text, true);
-                                            }
-                                        }
-                                    }
                                     }
                                     if root.search-mode: Text {
                                         width: root.w-location;
