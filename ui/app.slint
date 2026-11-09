@@ -1078,6 +1078,7 @@ export component AppWindow inherits Window {
                     }
                     StarButton {
                         x: parent.width - 31px;
+                        width: 30px;
                         y: 0px;
                         height: parent.height;
                         active: root.favorite-active;
@@ -1312,7 +1313,9 @@ export component AppWindow inherits Window {
                             x: root.list-margin;
                             y: root.list-vmargin;
                             width: parent.width - 2 * root.list-margin;
-                            height: parent.height - 2 * root.list-vmargin;
+                            height: parent.height - root.list-vmargin;
+                            // Extra scrollable space so the last row clears the bottom edge.
+                            content-height: root.rows.length * root.row-height + root.list-vmargin;
                             for r[i] in root.rows: Rectangle {
                                 height: root.row-height;
                                 // Columns end before the right edge; what lies beyond acts as blank space.
@@ -1320,11 +1323,13 @@ export component AppWindow inherits Window {
                                     parent.width - root.blank-right,
                                     6px + root.w-name + (root.search-mode ? root.w-location : 0px) + root.w-date + root.w-kind + root.w-size);
                                 Rectangle {
+                                    x: 0px;
                                     width: parent.cols-w;
                                     background: i == root.drop-row ? Palette.accent-background.transparentize(0.6) : r.selected ? Palette.accent-background.transparentize(list-focus.has-focus ? 0.75 : 0.88) : row-touch.has-hover ? Palette.foreground.transparentize(0.95) : transparent;
                                 }
 
                                 row-touch := TouchArea {
+                                    x: 0px;
                                     width: parent.cols-w;
                                     pointer-event(e) => {
                                         if e.kind == PointerEventKind.down && e.button == PointerEventButton.left {
