@@ -5,9 +5,9 @@ use std::path::PathBuf;
 use fex_core::menu::MenuItem;
 use windows::Win32::Foundation::HWND;
 use windows::Win32::Graphics::Gdi::{
-    ANTIALIASED_QUALITY, BITMAPINFO, BITMAPINFOHEADER, BI_RGB, CLIP_DEFAULT_PRECIS, CreateCompatibleDC, CreateDIBSection,
+    ANTIALIASED_QUALITY, BITMAP, BITMAPINFO, BITMAPINFOHEADER, BI_RGB, CLIP_DEFAULT_PRECIS, CreateCompatibleDC, CreateDIBSection,
     CreateFontW, DEFAULT_CHARSET, DIB_RGB_COLORS, DT_CENTER, DT_NOCLIP, DT_SINGLELINE, DT_VCENTER, DeleteDC, DeleteObject,
-    DrawTextW, FW_NORMAL, GdiFlush, HBITMAP, HGDIOBJ, OUT_DEFAULT_PRECIS, SelectObject, SetBkMode, SetTextColor,
+    DrawTextW, FW_NORMAL, GdiFlush, GetDC, GetDIBits, GetObjectW, HBITMAP, ReleaseDC, HGDIOBJ, OUT_DEFAULT_PRECIS, SelectObject, SetBkMode, SetTextColor,
     TRANSPARENT,
 };
 use windows::Win32::Foundation::{COLORREF, RECT};
@@ -18,8 +18,8 @@ use windows::Win32::UI::Shell::{
 };
 use windows::Win32::UI::WindowsAndMessaging::{
     AppendMenuW, CreatePopupMenu, DestroyMenu, GetIconInfo, GetMenuItemCount, GetSystemMetrics, HMENU, ICONINFO,
-    MENU_ITEM_FLAGS, MENUITEMINFOW, MF_BYCOMMAND, MF_GRAYED, MF_POPUP, MF_SEPARATOR, MF_STRING, MIIM_BITMAP,
-    SM_CXSMICON, SetMenuDefaultItem, SetMenuItemBitmaps, SetMenuItemInfoW, TPM_RETURNCMD, TPM_RIGHTBUTTON,
+    MENU_ITEM_FLAGS, MENUITEMINFOW, MF_GRAYED, MF_POPUP, MF_SEPARATOR, MF_STRING, MIIM_BITMAP,
+    SM_CXSMICON, SetMenuDefaultItem, SetMenuItemInfoW, TPM_RETURNCMD, TPM_RIGHTBUTTON,
     TrackPopupMenuEx,
 };
 use windows::core::{HSTRING, PCWSTR, w};
@@ -103,8 +103,8 @@ pub fn show(hwnd: isize, at: (i32, i32), top: &[Own], items: &[MenuItem], bottom
     }
 }
 
-/// Loads a menu icon and returns the color+mask bitmaps the menu can draw with.
-unsafe fn icon_bitmaps(icon: &Icon) -> Option<(HBITMAP, HBITMAP)> {
+/// Loads a menu icon as a bitmap the menu can draw with (premultiplied alpha).
+unsafe fn icon_bitmaps(icon: &Icon) -> Option<HBITMAP> {
     unsafe {
         let hicon = match icon {
             Icon::Glyph(_) => return None, // drawn as an alpha bitmap; see `glyph_bitmap`
@@ -136,13 +136,66 @@ unsafe fn icon_bitmaps(icon: &Icon) -> Option<(HBITMAP, HBITMAP)> {
         let mut info = ICONINFO { fIcon: true.into(), ..Default::default() };
         let ok = GetIconInfo(hicon, &mut info).is_ok();
         let _ = windows::Win32::UI::WindowsAndMessaging::DestroyIcon(hicon);
-        if !ok || info.hbmColor.is_invalid() {
-            if !info.hbmMask.is_invalid() {
-                let _ = DeleteObject(HGDIOBJ(info.hbmMask.0));
-            }
+        if !ok {
             return None;
         }
-        Some((info.hbmColor, info.hbmMask))
+        let out = icon_alpha_bitmap(&info);
+        let _ = DeleteObject(HGDIOBJ(info.hbmColor.0));
+        let _ = DeleteObject(HGDIOBJ(info.hbmMask.0));
+        out
+    }
+}
+
+/// An icon's pixels as a premultiplied-alpha bitmap. The old color+mask pair makes the menu
+/// paint transparent areas black.
+unsafe fn icon_alpha_bitmap(info: &ICONINFO) -> Option<HBITMAP> {
+    unsafe {
+        if info.hbmColor.is_invalid() {
+            return None;
+        }
+        let mut bm = BITMAP::default();
+        if GetObjectW(HGDIOBJ(info.hbmColor.0), size_of::<BITMAP>() as i32, Some((&raw mut bm).cast())) == 0 {
+            return None;
+        }
+        let (w, h) = (bm.bmWidth, bm.bmHeight);
+        let mut color = bits(info.hbmColor, w, h)?;
+        // Old icons have no alpha channel: transparency comes from the mask (white = transparent).
+        if color.chunks_exact(4).all(|p| p[3] == 0) {
+            let mask = bits(info.hbmMask, w, h)?;
+            for (c, m) in color.chunks_exact_mut(4).zip(mask.chunks_exact(4)) {
+                c[3] = if m[0] == 0 { 255 } else { 0 };
+            }
+        }
+        for p in color.chunks_exact_mut(4) {
+            let a = p[3] as u32;
+            for c in &mut p[..3] {
+                *c = (*c as u32 * a / 255) as u8;
+            }
+        }
+        dib(w, h, &color)
+    }
+}
+
+/// A bitmap's pixels as top-down 32-bit BGRA.
+unsafe fn bits(bmp: HBITMAP, w: i32, h: i32) -> Option<Vec<u8>> {
+    unsafe {
+        let mut info = BITMAPINFO {
+            bmiHeader: BITMAPINFOHEADER {
+                biSize: size_of::<BITMAPINFOHEADER>() as u32,
+                biWidth: w,
+                biHeight: -h,
+                biPlanes: 1,
+                biBitCount: 32,
+                biCompression: BI_RGB.0,
+                ..Default::default()
+            },
+            ..Default::default()
+        };
+        let mut buf = vec![0u8; (w * h * 4) as usize];
+        let dc = GetDC(None);
+        let lines = GetDIBits(dc, bmp, 0, h as u32, Some(buf.as_mut_ptr().cast()), &mut info, DIB_RGB_COLORS);
+        ReleaseDC(None, dc);
+        (lines == h).then_some(buf)
     }
 }
 
@@ -196,12 +249,8 @@ impl Level {
                 }
                 if let Some(Icon::Glyph(g)) = &o.icon {
                     self.set_last_bitmap(glyph_bitmap(*g), bitmaps);
-                } else if let Some(icon) = &o.icon
-                    && let Some((color, mask)) = icon_bitmaps(icon)
-                {
-                    let usable = (!mask.is_invalid()).then_some(mask);
-                    let _ = SetMenuItemBitmaps(self.menu, o.id, MF_BYCOMMAND, Some(color), usable);
-                    bitmaps.push((color, mask));
+                } else if let Some(icon) = &o.icon {
+                    self.set_last_bitmap(icon_bitmaps(icon), bitmaps);
                 }
             }
         }
