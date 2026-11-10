@@ -9,6 +9,8 @@ export struct Row {
     editing: bool,
     // On the clipboard after Ctrl+X, until it is pasted or replaced.
     cut: bool,
+    // Has the Hidden attribute (shown translucent when "Show hidden items" is on).
+    hidden: bool,
     // UTF-8 byte length of the name without its extension (pre-selected when renaming).
     stem: int,
     // Folder of a search hit; empty when browsing a folder.
@@ -1559,7 +1561,7 @@ export component AppWindow inherits Window {
                                         }
                                     }
                                     // Cut items wait translucent, like Explorer, until pasted.
-                                    opacity: r.cut ? 0.45 : 1;
+                                    opacity: r.cut || r.hidden ? 0.45 : 1;
                                     Image {
                                         width: 16px;
                                         source: r.icon;

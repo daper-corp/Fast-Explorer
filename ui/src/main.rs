@@ -241,6 +241,7 @@ impl Model for Rows {
             selected: self.selected.borrow()[i as usize],
             editing: self.editing.get() == Some(i),
             cut,
+            hidden: e.attrs & 0x2 != 0,
             stem: stem as i32,
             name: name.into(),
             location: self.locations.borrow().get(i as usize).map(|s| s.as_str().into()).unwrap_or_default(),
