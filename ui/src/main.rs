@@ -2925,7 +2925,6 @@ impl App {
             self.resort(t);
         }
         self.sync_fit(&self.tab());
-        ui.invoke_focus_list();
     }
 
     fn icon_loaded(&self, key: IconKey, px: Option<icons::Pixels>) {
