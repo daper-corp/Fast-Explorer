@@ -174,3 +174,8 @@ msgstr "현재 폴더를 추가하려면 +"
 msgid "Extension"
 msgstr "확장자"
 
+msgid "Language"
+msgstr "언어"
+
+msgid "System default"
+msgstr "시스템 기본값"

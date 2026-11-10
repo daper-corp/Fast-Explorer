@@ -2501,6 +2501,19 @@ impl App {
         });
     }
 
+    /// Switches the language (0 = system, 1 = English, 2 = Korean) immediately.
+    fn set_language(&self, i: i32) {
+        let lang = ["", "en", "ko"].get(i as usize).copied().unwrap_or("");
+        *LANG.lock().unwrap() = lang.to_string();
+        save_view();
+        fex_core::i18n::set_lang(lang);
+        let _ = slint::select_bundled_translation(if fex_core::i18n::korean() { "ko" } else { "en" });
+        // ponytail: rebuild listings so row texts follow; transient notes stay in the old language
+        for t in self.tabs.borrow().iter() {
+            self.reload(t, After::default());
+        }
+    }
+
     // ---------- context menus ----------
 
     fn next_seq(&self) -> u64 {
@@ -3836,6 +3849,19 @@ fn view_file() -> Option<PathBuf> {
 /// The folder a new window/tab opens ("" = C:\), kept in `view.txt` as `home=`.
 static HOME: std::sync::Mutex<String> = std::sync::Mutex::new(String::new());
 
+/// UI language choice kept in `view.txt` as `lang=` ("" = system, "en", "ko").
+static LANG: std::sync::Mutex<String> = std::sync::Mutex::new(String::new());
+
+/// Reads `lang=` from `view.txt` and applies it (an explicit `FEX_LANG` wins).
+fn apply_saved_lang() {
+    let text = view_file().and_then(|f| std::fs::read_to_string(f).ok()).unwrap_or_default();
+    let lang = text.lines().find_map(|l| l.trim().strip_prefix("lang=")).unwrap_or("").trim().to_string();
+    if std::env::var_os("FEX_LANG").is_none() {
+        fex_core::i18n::set_lang(&lang);
+    }
+    *LANG.lock().unwrap() = lang;
+}
+
 /// The configured default folder, or `C:\` when unset or no longer there.
 fn home_path() -> PathBuf {
     let home = HOME.lock().map(|h| h.clone()).unwrap_or_default();
@@ -3854,6 +3880,9 @@ fn load_view() -> (bool, bool) {
     };
     for line in text.lines() {
         let Some((key, value)) = line.trim().split_once('=') else { continue };
+        if key.trim() == "lang" {
+            continue;
+        }
         if key.trim() == "home" {
             *HOME.lock().unwrap() = value.trim().to_string();
             continue;
@@ -3879,8 +3908,9 @@ fn save_view() {
         let _ = std::fs::create_dir_all(dir);
     }
     let home = HOME.lock().map(|h| h.clone()).unwrap_or_default();
+    let lang = LANG.lock().map(|l| l.clone()).unwrap_or_default();
     let text = format!(
-        "hidden={}\r\next={}\r\ntree={}\r\nhome={home}",
+        "hidden={}\r\next={}\r\ntree={}\r\nlang={lang}\r\nhome={home}",
         SHOW_HIDDEN.load(Relaxed) as u8,
         SHOW_EXT.load(Relaxed) as u8,
         TREE_VIEW.load(Relaxed) as u8
@@ -4070,6 +4100,7 @@ fn log_panics() {
 
 fn main() -> Result<(), slint::PlatformError> {
     log_panics();
+    apply_saved_lang();
     let ui = AppWindow::new()?;
     if fex_core::i18n::korean() {
         let _ = slint::select_bundled_translation("ko");
@@ -4092,6 +4123,11 @@ fn main() -> Result<(), slint::PlatformError> {
     ui.set_show_ext(show_ext);
     ui.set_tree_view(TREE_VIEW.load(Relaxed));
     ui.set_home_path(HOME.lock().unwrap().clone().into());
+    ui.set_lang_index(match LANG.lock().unwrap().as_str() {
+        "en" => 1,
+        "ko" => 2,
+        _ => 0,
+    });
     ui.set_app_version(update::CURRENT.into());
     ui.set_auto_update(update::auto_enabled());
     ui.set_this_pc_path(THIS_PC.into());
@@ -4205,6 +4241,7 @@ fn main() -> Result<(), slint::PlatformError> {
     }));
     ui.on_view_changed(|| app(|a| a.view_changed()));
     ui.on_auto_update_changed(|| app(|a| update::set_auto(a.ui().get_auto_update())));
+    ui.on_lang_changed(|i| app(|a| a.set_language(i)));
     ui.on_check_update(|| app(|a| a.check_update()));
     ui.on_suggest(|t| app(|a| a.suggest(&t)));
     ui.on_suggest_cancel(|| app(|a| a.cancel_suggest()));

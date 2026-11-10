@@ -14,8 +14,26 @@ const TABLES: [&str; 3] = [
     include_str!("../i18n/ui_other.tsv"),
 ];
 
+/// Language chosen at runtime: 0 = automatic, 1 = English, 2 = Korean.
+static CHOICE: std::sync::atomic::AtomicU8 = std::sync::atomic::AtomicU8::new(0);
+
+/// Picks the UI language ("en", "ko", anything else = automatic). Takes effect on the next `t!`.
+pub fn set_lang(lang: &str) {
+    let v = match lang {
+        "en" => 1,
+        "ko" => 2,
+        _ => 0,
+    };
+    CHOICE.store(v, std::sync::atomic::Ordering::Relaxed);
+}
+
 /// True when the UI language is Korean.
 pub fn korean() -> bool {
+    match CHOICE.load(std::sync::atomic::Ordering::Relaxed) {
+        1 => return false,
+        2 => return true,
+        _ => {}
+    }
     static KO: OnceLock<bool> = OnceLock::new();
     *KO.get_or_init(|| match std::env::var("FEX_LANG") {
         Ok(v) => v.eq_ignore_ascii_case("ko"),
