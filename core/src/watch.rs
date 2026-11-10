@@ -5,6 +5,7 @@ use std::ffi::c_void;
 use std::io;
 use std::os::windows::ffi::OsStrExt;
 use std::path::PathBuf;
+use std::sync::atomic::{AtomicBool, Ordering::SeqCst};
 use std::sync::{Arc, Mutex};
 use std::thread::{self, JoinHandle};
 
@@ -120,6 +121,7 @@ impl Watch {
 pub struct DirWatch {
     ctrl: Owned<HANDLE>,
     desired: Arc<Mutex<Option<PathBuf>>>,
+    stop: Arc<AtomicBool>,
     thread: Option<JoinHandle<()>>,
 }
 
@@ -129,10 +131,12 @@ impl DirWatch {
         let raw = ctrl.0 as isize;
         let desired = Arc::new(Mutex::new(None));
         let worker = desired.clone();
+        let stop = Arc::new(AtomicBool::new(false));
+        let stopped = stop.clone();
         let thread = thread::Builder::new()
             .name("fex-watch".into())
-            .spawn(move || run(raw, worker, on_change))?;
-        Ok(DirWatch { ctrl, desired, thread: Some(thread) })
+            .spawn(move || run(raw, worker, stopped, on_change))?;
+        Ok(DirWatch { ctrl, desired, stop, thread: Some(thread) })
     }
 
     /// Watches `path` from now on. Cheap no-op while it is already the watched folder.
@@ -152,7 +156,7 @@ impl DirWatch {
 
 impl Drop for DirWatch {
     fn drop(&mut self) {
-        *self.desired.lock().unwrap() = None;
+        self.stop.store(true, SeqCst);
         unsafe {
             let _ = SetEvent(*self.ctrl);
         }
@@ -162,12 +166,19 @@ impl Drop for DirWatch {
     }
 }
 
-fn run(ctrl: isize, desired: Arc<Mutex<Option<PathBuf>>>, on_change: impl Fn()) {
+fn run(ctrl: isize, desired: Arc<Mutex<Option<PathBuf>>>, stop: Arc<AtomicBool>, on_change: impl Fn()) {
     let ctrl = HANDLE(ctrl as *mut c_void);
     let mut watch: Option<Watch> = None;
     loop {
+        if stop.load(SeqCst) {
+            return;
+        }
         let wanted = desired.lock().unwrap().clone();
-        let Some(path) = wanted else { return };
+        let Some(path) = wanted else {
+            // Nothing to watch yet (the first folder is still loading): wait for a request.
+            idle(ctrl, INFINITE);
+            continue;
+        };
 
         if watch.as_ref().is_none_or(|w| w.path != path) {
             watch = Watch::open(&path).ok();
