@@ -690,6 +690,7 @@ export component AppWindow inherits Window {
     in property <string> update-status;
     in-out property <bool> show-hidden;
     in-out property <bool> show-ext;
+    in-out property <bool> tree-view;
     in property <bool> can-back;
     in property <bool> can-forward;
     in property <int> sort-column;
@@ -1480,11 +1481,12 @@ export component AppWindow inherits Window {
                                 HorizontalLayout {
                                     padding-left: 6px;
                                     alignment: start;
-                                    private property <length> tree-indent: root.search-mode ? (14px + r.depth * 14px) : 0px;
-                                    if root.search-mode: Rectangle {
+                                    private property <bool> tree-col: root.search-mode || (root.tree-view && !root.this-pc);
+                                    private property <length> tree-indent: tree-col ? (14px + r.depth * 14px) : 0px;
+                                    if tree-col: Rectangle {
                                         width: r.depth * 14px;
                                     }
-                                    if root.search-mode: Rectangle {
+                                    if tree-col: Rectangle {
                                         width: 14px;
                                         height: 100%;
                                         // Drawn as a path: the glyph is missing from some UI fonts.
@@ -1845,6 +1847,13 @@ export component AppWindow inherits Window {
                 CheckBox {
                     text: "파일 확장명 표시";
                     checked <=> root.show-ext;
+                    changed checked => {
+                        root.view-changed();
+                    }
+                }
+                CheckBox {
+                    text: "폴더를 트리로 보기";
+                    checked <=> root.tree-view;
                     changed checked => {
                         root.view-changed();
                     }

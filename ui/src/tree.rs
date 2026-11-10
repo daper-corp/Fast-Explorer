@@ -42,6 +42,8 @@ struct Node {
     expanded: bool,
     /// The item itself matched (not just a folder on the way to a match).
     hit: bool,
+    /// Folder browsing: a folder whose children have not been read yet.
+    unread: bool,
 }
 
 /// A search result tree. Node indices are row-entry indices as well.
@@ -121,13 +123,44 @@ impl SearchTree {
     fn push(&mut self, entries: &mut Vec<Entry>, parent: Option<u32>, path: PathBuf, entry: Entry, hit: bool) -> u32 {
         let node = entries.len() as u32;
         entries.push(entry);
-        self.nodes.push(Node { path: path.clone(), children: Vec::new(), expanded: true, hit });
+        self.nodes.push(Node { path: path.clone(), children: Vec::new(), expanded: true, hit, unread: false });
         match parent {
             Some(p) => self.nodes[p as usize].children.push(node),
             None => self.roots.push(node),
         }
         self.by_path.insert(path_key(&path), node);
         node
+    }
+
+    /// A browsing tree over one folder's listing: node `i` is `entries[i]`, all collapsed, and
+    /// folders are read when first expanded (see `add_children`).
+    pub fn browse(entries: &[Entry], dir: &Path) -> Self {
+        let mut tree = SearchTree::default();
+        for (i, e) in entries.iter().enumerate() {
+            let path = dir.join(e.os_name());
+            tree.by_path.insert(path_key(&path), i as u32);
+            tree.nodes.push(Node { path, children: Vec::new(), expanded: false, hit: true, unread: e.is_dir() });
+            tree.roots.push(i as u32);
+        }
+        tree
+    }
+
+    /// Whether this folder still has to be read before it can expand.
+    pub fn is_unread(&self, node: u32) -> bool {
+        self.nodes.get(node as usize).is_some_and(|n| n.unread)
+    }
+
+    /// Adds a folder's freshly read items under it and expands it.
+    pub fn add_children(&mut self, entries: &mut Vec<Entry>, node: u32, list: Vec<Entry>) {
+        let dir = self.nodes[node as usize].path.clone();
+        for e in list {
+            let (path, is_dir) = (dir.join(e.os_name()), e.is_dir());
+            let kid = self.push(entries, Some(node), path, e, true);
+            self.nodes[kid as usize].unread = is_dir;
+        }
+        let n = &mut self.nodes[node as usize];
+        n.unread = false;
+        n.expanded = true;
     }
 
     /// The node's full path, for opening/dragging a row.
@@ -257,7 +290,7 @@ impl SearchTree {
             return (false, 0);
         }
         order.push(node);
-        metas[node as usize] = RowMeta { depth, expandable: any_visible, expanded: n.expanded };
+        metas[node as usize] = RowMeta { depth, expandable: any_visible || n.unread, expanded: n.expanded };
         locations[node as usize] = n.path.parent().map(|p| p.display().to_string()).unwrap_or_default();
         if n.expanded {
             order.extend(kid_order);
@@ -377,6 +410,27 @@ mod tests {
         let flat = tree.flatten(&entries, SortKey::Name, false, true, true, true, true);
         assert_eq!(names(&tree, &entries, &flat), ["C:", "only", "hidden.txt"]);
         assert_eq!(flat.hits, 1);
+    }
+
+    #[test]
+    fn browse_tree_reads_folders_when_expanded() {
+        let mut entries = vec![entry("b.txt", false, 0), entry("dir", true, 0), entry("a.txt", false, 0)];
+        let mut tree = SearchTree::browse(&entries, Path::new(r"C:\x"));
+        let show = |tree: &SearchTree, entries: &[Entry]| tree.flatten(entries, SortKey::Name, false, false, true, true, true);
+        let flat = show(&tree, &entries);
+        assert_eq!(names(&tree, &entries, &flat), ["dir", "a.txt", "b.txt"]);
+        let dir = flat.order[0];
+        assert!(flat.metas[dir as usize].expandable && !flat.metas[dir as usize].expanded);
+        assert!(!flat.metas[flat.order[1] as usize].expandable);
+        assert!(tree.is_unread(dir) && !tree.toggle(dir));
+        tree.add_children(&mut entries, dir, vec![entry("in.txt", false, 0)]);
+        let flat = show(&tree, &entries);
+        assert_eq!(names(&tree, &entries, &flat), ["dir", "in.txt", "a.txt", "b.txt"]);
+        assert_eq!(flat.metas[flat.order[1] as usize].depth, 1);
+        assert_eq!(tree.path(flat.order[1]), Some(Path::new(r"C:\x\dir\in.txt")));
+        assert!(tree.toggle(dir)); // collapse
+        let flat = show(&tree, &entries);
+        assert_eq!(names(&tree, &entries, &flat), ["dir", "a.txt", "b.txt"]);
     }
 
     #[test]

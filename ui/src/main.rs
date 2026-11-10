@@ -141,6 +141,8 @@ struct Rows {
     locations: RefCell<Vec<String>>,
     /// Search-tree display facts (empty when listing a folder or showing "내 PC").
     meta: RefCell<Vec<RowMeta>>,
+    /// The "트리 보기" folder tree over `entries`; dropped whenever the entries are replaced.
+    browse: RefCell<Option<SearchTree>>,
     /// Per-entry overrides used by the virtual "내 PC" view. They stay empty for real folders,
     /// so row_data falls back to the entry itself.
     paths: RefCell<Vec<String>>,
@@ -156,6 +158,8 @@ struct Rows {
 /// View options shared by every tab (initially Explorer's own settings).
 static SHOW_HIDDEN: AtomicBool = AtomicBool::new(false);
 static SHOW_EXT: AtomicBool = AtomicBool::new(true);
+/// Folders list as an expandable tree (off by default).
+static TREE_VIEW: AtomicBool = AtomicBool::new(false);
 
 // Paths on the clipboard after Ctrl+X. Explorer shows them translucent until pasted.
 thread_local! {
@@ -277,6 +281,7 @@ impl Rows {
         *self.order.borrow_mut() = order;
         self.locations.borrow_mut().clear();
         self.meta.borrow_mut().clear();
+        self.browse.take();
         self.paths.borrow_mut().clear();
         self.kinds.borrow_mut().clear();
         self.dates.borrow_mut().clear();
@@ -290,6 +295,7 @@ impl Rows {
     fn replace_search(&self, entries: Vec<Entry>, flat: FlatTree) {
         *self.selected.borrow_mut() = vec![false; entries.len()];
         *self.entries.borrow_mut() = Arc::new(entries);
+        self.browse.take();
         self.paths.borrow_mut().clear();
         self.kinds.borrow_mut().clear();
         self.dates.borrow_mut().clear();
@@ -333,6 +339,7 @@ impl Rows {
         *self.usage.borrow_mut() = usage;
         self.locations.borrow_mut().clear();
         self.meta.borrow_mut().clear();
+        self.browse.take();
         self.editing.set(None);
         self.notify.reset();
     }
@@ -550,6 +557,9 @@ impl Tab {
         if let Some(search) = &*self.search.borrow()
             && let Some(path) = search.tree.path(idx)
         {
+            return path.to_path_buf();
+        }
+        if let Some(path) = self.rows.browse.borrow().as_ref().and_then(|b| b.path(idx)) {
             return path.to_path_buf();
         }
         self.cwd.borrow().join(self.rows.entries.borrow()[idx as usize].os_name())
@@ -1250,6 +1260,16 @@ impl App {
         t.bump_sort();
         let seq = t.sort_gen.get();
         let (key, desc) = t.sort.get();
+        // ponytail: the folder tree is flattened on the UI thread; a huge folder may stall briefly.
+        if t.search.borrow().is_none() && TREE_VIEW.load(Relaxed) && !is_this_pc(&t.cwd.borrow()) {
+            self.browse_flatten(t);
+            self.apply_after(t);
+            t.rows.notify.reset();
+            self.reveal_cursor(t);
+            self.sync_fit(t);
+            self.update_status(t);
+            return;
+        }
         // A search tree sorts within each folder, so it is cheap enough to do here.
         if t.search.borrow().is_some() {
             let flat = {
@@ -1340,6 +1360,9 @@ impl App {
         }
         t.bump_sort();
         t.rows.replace(all, order);
+        if TREE_VIEW.load(Relaxed) {
+            self.browse_flatten(&t); // ponytail: a refresh collapses opened folders
+        }
         t.list_ms.set(ms(took));
         t.cursor.set(None);
         t.anchor.set(None);
@@ -1747,7 +1770,6 @@ impl App {
             }
             // A search-tree folder collapses/expands with Left/Right; other rows move normally.
             _ if (is(Key::LeftArrow) || is(Key::RightArrow))
-                && t.search.borrow().is_some()
                 && self.tree_arrow(&t, is(Key::RightArrow)) => {}
             _ if is(Key::UpArrow) || is(Key::DownArrow) || is(Key::Home) || is(Key::End)
                 || is(Key::PageUp) || is(Key::PageDown) =>
@@ -2291,10 +2313,69 @@ impl App {
         self.update_status(t);
     }
 
+    /// Shows the folder listing as a tree: the listed items are the roots, collapsed.
+    fn browse_flatten(&self, t: &Tab) {
+        let (key, desc) = t.sort.get();
+        let flat = {
+            let entries = t.rows.entries.borrow();
+            let mut browse = t.rows.browse.borrow_mut();
+            let tree = browse.get_or_insert_with(|| SearchTree::browse(&entries, &t.cwd.borrow()));
+            tree.flatten(&entries, key, desc, SHOW_HIDDEN.load(Relaxed), true, true, true)
+        };
+        t.rows.update_search(flat);
+    }
+
+    /// Expands a folder of the browsing tree, reading it on a worker the first time.
+    fn toggle_browse(&self, t: &Rc<Tab>, node: u32) {
+        let (toggled, path) = {
+            let mut browse = t.rows.browse.borrow_mut();
+            let Some(tree) = browse.as_mut() else { return };
+            if tree.toggle(node) {
+                (true, None)
+            } else if tree.is_unread(node) {
+                (false, tree.path(node).map(Path::to_path_buf))
+            } else {
+                return;
+            }
+        };
+        if toggled {
+            self.browse_flatten(t);
+            return self.update_status(t);
+        }
+        let Some(path) = path else { return };
+        let (id, epoch) = (t.id, t.epoch.load(SeqCst)); // a new listing bumps the epoch
+        thread::spawn(move || {
+            let mut all = Vec::new();
+            let res = list_dir(&path, |b| {
+                all.extend(b);
+                true
+            });
+            post(move |a| a.browse_loaded(id, epoch, node, all, res.err()));
+        });
+    }
+
+    fn browse_loaded(&self, id: u64, epoch: u64, node: u32, list: Vec<Entry>, err: Option<io::Error>) {
+        let Some(t) = self.current(id, epoch) else { return };
+        if let Some(e) = err {
+            return self.set_note(&t, format!("열 수 없음: {e}"));
+        }
+        {
+            let mut entries = t.rows.entries.borrow_mut();
+            let mut browse = t.rows.browse.borrow_mut();
+            let Some(tree) = browse.as_mut().filter(|tree| tree.is_unread(node)) else { return };
+            tree.add_children(Arc::make_mut(&mut entries), node, list);
+        }
+        self.browse_flatten(&t);
+        self.update_status(&t);
+    }
+
     /// Expands or collapses one folder row of the search tree.
     fn toggle_expand(&self, row: usize) {
         let t = self.tab();
         let Some(node) = t.rows.entry(row) else { return };
+        if t.search.borrow().is_none() {
+            return self.toggle_browse(&t, node);
+        }
         let flat = {
             let mut search = t.search.borrow_mut();
             let Some(search) = search.as_mut() else { return };
@@ -2312,7 +2393,11 @@ impl App {
 
     /// Left/Right on a search-tree folder row; false lets normal cursor movement happen.
     fn tree_arrow(&self, t: &Tab, right: bool) -> bool {
-        if !t.search.borrow().as_ref().is_some_and(|s| s.options.tree) {
+        let tree_on = match &*t.search.borrow() {
+            Some(s) => s.options.tree,
+            None => t.rows.browse.borrow().is_some(),
+        };
+        if !tree_on {
             return false;
         }
         let Some(row) = self.cursor_row(t) else { return false };
@@ -2920,9 +3005,16 @@ impl App {
         let ui = self.ui();
         SHOW_HIDDEN.store(ui.get_show_hidden(), Relaxed);
         SHOW_EXT.store(ui.get_show_ext(), Relaxed);
+        let tree = ui.get_tree_view();
+        let tree_changed = TREE_VIEW.swap(tree, Relaxed) != tree;
         save_view();
         for t in self.tabs.borrow().iter() {
-            self.resort(t);
+            let plain = t.search.borrow().is_none() && t.pending.borrow().is_none() && !is_this_pc(&t.cwd.borrow());
+            if tree_changed && plain {
+                self.reload(t, After::default()); // rebuild the listing in the new shape
+            } else {
+                self.resort(t);
+            }
         }
         self.sync_fit(&self.tab());
     }
@@ -3688,6 +3780,7 @@ fn load_view() -> (bool, bool) {
         match key.trim() {
             "hidden" => hidden = on,
             "ext" => ext = on,
+            "tree" => TREE_VIEW.store(on, Relaxed),
             _ => {}
         }
     }
@@ -3700,7 +3793,12 @@ fn save_view() {
         let _ = std::fs::create_dir_all(dir);
     }
     let home = HOME.lock().map(|h| h.clone()).unwrap_or_default();
-    let text = format!("hidden={}\r\next={}\r\nhome={home}", SHOW_HIDDEN.load(Relaxed) as u8, SHOW_EXT.load(Relaxed) as u8);
+    let text = format!(
+        "hidden={}\r\next={}\r\ntree={}\r\nhome={home}",
+        SHOW_HIDDEN.load(Relaxed) as u8,
+        SHOW_EXT.load(Relaxed) as u8,
+        TREE_VIEW.load(Relaxed) as u8
+    );
     let _ = std::fs::write(file, text);
 }
 
@@ -3903,6 +4001,7 @@ fn main() -> Result<(), slint::PlatformError> {
     SHOW_EXT.store(show_ext, Relaxed);
     ui.set_show_hidden(show_hidden);
     ui.set_show_ext(show_ext);
+    ui.set_tree_view(TREE_VIEW.load(Relaxed));
     ui.set_home_path(HOME.lock().unwrap().clone().into());
     ui.set_app_version(update::CURRENT.into());
     ui.set_auto_update(update::auto_enabled());
