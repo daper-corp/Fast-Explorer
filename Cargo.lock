@@ -1170,7 +1170,7 @@ dependencies = [
 
 [[package]]
 name = "fex"
-version = "0.2.4"
+version = "0.2.5"
 dependencies = [
  "fex-core",
  "raw-window-handle",
@@ -1183,7 +1183,7 @@ dependencies = [
 
 [[package]]
 name = "fex-core"
-version = "0.2.4"
+version = "0.2.5"
 dependencies = [
  "ignore",
  "regex",
@@ -1192,7 +1192,7 @@ dependencies = [
 
 [[package]]
 name = "fex-index"
-version = "0.2.4"
+version = "0.2.5"
 dependencies = [
  "fex-core",
  "windows",
@@ -1201,7 +1201,7 @@ dependencies = [
 
 [[package]]
 name = "fex-shell-host"
-version = "0.2.4"
+version = "0.2.5"
 dependencies = [
  "fex-core",
  "windows",

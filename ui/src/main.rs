@@ -706,6 +706,16 @@ impl App {
         self.navigate(&tab, path, Hist::Push, None);
     }
 
+    /// Wheel-click: open in a new tab but stay on the current one.
+    fn new_tab_bg(&self, path: PathBuf) {
+        let id = self.next_id.get();
+        self.next_id.set(id + 1);
+        let tab = Rc::new(Tab::new(id));
+        self.tabs.borrow_mut().push(tab.clone());
+        self.sync_tabs();
+        self.navigate(&tab, path, Hist::Push, None);
+    }
+
     fn select_tab(&self, i: usize, save_scroll: bool) {
         if i >= self.tabs.borrow().len() {
             return;
@@ -888,7 +898,7 @@ impl App {
 
     /// Sidebar middle-click: open the place in its own tab.
     fn open_place_in_tab(&self, path: &str) {
-        self.new_tab(PathBuf::from(path));
+        self.new_tab_bg(PathBuf::from(path));
     }
 
     fn add_favorite(&self) {
@@ -1465,7 +1475,7 @@ impl App {
         let t = self.tab();
         let Some(i) = t.rows.entry(row) else { return };
         if t.rows.is_dir(i) {
-            self.new_tab(t.path_of(i));
+            self.new_tab_bg(t.path_of(i));
         }
     }
 
