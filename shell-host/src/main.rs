@@ -41,6 +41,8 @@ struct Built {
     seq: u64,
     cm: IContextMenu,
     menu: HMENU,
+    /// Folder of a background menu; static verbs expand "%V" from it.
+    dir: Option<PathBuf>,
 }
 
 impl Drop for Built {
@@ -153,15 +155,15 @@ fn handle(hwnd: HWND, req: &Request) {
         },
         Request::Invoke { seq, id } => {
             // Clone out of LAST: the command may run a modal loop that handles more requests.
-            let cm = LAST.with(|l| l.borrow().as_ref().filter(|b| b.seq == *seq).map(|b| b.cm.clone()));
+            let cm = LAST.with(|l| l.borrow().as_ref().filter(|b| b.seq == *seq).map(|b| (b.cm.clone(), b.dir.clone())));
             let r = match cm {
-                Some(cm) => unsafe { invoke(hwnd, &cm, Verb::Id(*id)) },
+                Some((cm, dir)) => unsafe { invoke(hwnd, &cm, dir.as_deref(), Verb::Id(*id)) },
                 None => Err(Error::new(E_FAIL, "메뉴가 바뀌었습니다. 다시 열어 주세요.")),
             };
             reply_done(*seq, r);
         }
         Request::Verb { seq, verb, .. } => {
-            let r = build(hwnd, *seq, req).and_then(|b| unsafe { invoke(hwnd, &b.cm, Verb::Name(verb)) });
+            let r = build(hwnd, *seq, req).and_then(|b| unsafe { invoke(hwnd, &b.cm, b.dir.as_deref(), Verb::Name(verb)) });
             reply_done(*seq, r);
         }
     }
@@ -191,7 +193,11 @@ fn build(hwnd: HWND, seq: u64, req: &Request) -> Result<Built> {
             Request::Items { paths, .. } | Request::Verb { paths, .. } => item_menu(hwnd, paths)?,
             Request::Invoke { .. } => return Err(E_FAIL.into()),
         };
-        let built = Built { seq, cm, menu: CreatePopupMenu()? };
+        let dir = match req {
+            Request::Background { folder, .. } => Some(folder.clone()),
+            _ => None,
+        };
+        let built = Built { seq, cm, menu: CreatePopupMenu()?, dir };
         built.cm.QueryContextMenu(built.menu, 0, 1, LAST_ID, CMF_NORMAL).ok()?;
         Ok(built)
     }
@@ -358,8 +364,9 @@ enum Verb<'a> {
     Name(&'a str),
 }
 
-unsafe fn invoke(hwnd: HWND, cm: &IContextMenu, verb: Verb) -> Result<()> {
+unsafe fn invoke(hwnd: HWND, cm: &IContextMenu, dir: Option<&Path>, verb: Verb) -> Result<()> {
     let (ansi, wide);
+    let dir = dir.map(|d| HSTRING::from(d.as_os_str()));
     let mut info = CMINVOKECOMMANDINFOEX {
         cbSize: size_of::<CMINVOKECOMMANDINFOEX>() as u32,
         fMask: CMIC_MASK_UNICODE,
@@ -367,6 +374,10 @@ unsafe fn invoke(hwnd: HWND, cm: &IContextMenu, verb: Verb) -> Result<()> {
         nShow: SW_SHOWNORMAL.0,
         ..Default::default()
     };
+    if let Some(d) = &dir {
+        info.lpDirectoryW = PCWSTR(d.as_ptr());
+        info.lpDirectory = PCSTR(std::ptr::null()); // unicode field wins with CMIC_MASK_UNICODE
+    }
     match verb {
         Verb::Id(id) if (1..=LAST_ID).contains(&id) => {
             // MAKEINTRESOURCE(offset): the command's offset from idCmdFirst.
