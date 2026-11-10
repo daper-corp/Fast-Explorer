@@ -675,7 +675,10 @@ mod tests {
         fs::remove_dir_all(&root).unwrap();
     }
 
+    // Needs an interactive session with a real Recycle Bin (fails on CI runners):
+    // cargo test -p fex-core -- --ignored recycle_restore_round_trip
     #[test]
+    #[ignore = "needs an interactive session with a Recycle Bin"]
     fn recycle_restore_round_trip() {
         let root = std::env::temp_dir().join(format!("fex-undo-{}", std::process::id()));
         let _ = fs::remove_dir_all(&root);

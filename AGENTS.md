@@ -91,7 +91,7 @@ cargo fmt                               # 포맷 (rustfmt 설정 파일은 없�
 ```powershell
 cargo check --workspace
 cargo test -p fex-core
-cargo test -p fex --lib
+cargo test -p fex
 ```
 
 UI나 셸 통합을 건드렸다면 대화형 세션에서 `cargo test -p fex-shell-host`와 앱 실행(`cargo run -p fex`)까지 확인하세요. 인덱스 프로토콜을 건드렸다면 서비스를 재설치한 뒤 `live` 테스트를 실행하세요.

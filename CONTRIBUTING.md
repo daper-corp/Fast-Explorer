@@ -15,7 +15,7 @@ cargo build --workspace
 cargo run -p fex -- "C:\"
 cargo clippy --workspace --all-targets
 cargo test -p fex-core
-cargo test -p fex --lib
+cargo test -p fex
 ```
 
 `cargo test --workspace`의 `shell-host` 테스트는 대화형 Windows 세션이 필요합니다. 자세한 내용은 [README.md](README.md).
