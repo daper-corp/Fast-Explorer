@@ -3,8 +3,8 @@ members = ["core", "ui", "shell-host", "index-service"]
 resolver = "3"
 
 [workspace.package]
-version = "0.2.7"
-edition = "2024"
+version = "0.2.8"
+edition = "2026"
 license = "MIT"
 
 [profile.release]
