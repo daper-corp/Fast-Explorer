@@ -2485,7 +2485,11 @@ impl App {
             if !shell::confirm(hwnd, &ask) {
                 return;
             }
-            post(|a| a.ui().set_update_status("다운로드 중…".into()));
+            post(|a| {
+                let tabs: Vec<PathBuf> = a.tabs.borrow().iter().map(|t| t.cwd.borrow().clone()).collect();
+                update::save_session(a.active.get(), &tabs);
+                a.ui().set_update_status("다운로드 중…".into());
+            });
             match update::download(&rel).map_err(io::Error::other).and_then(|f| shell::open(&f)) {
                 Ok(()) => post(|_| {
                     let _ = slint::quit_event_loop();
@@ -4119,12 +4123,20 @@ fn main() -> Result<(), slint::PlatformError> {
         app(|a| a.key(&e.text, e.modifiers.control, e.modifiers.shift, e.modifiers.alt, in_list))
     });
 
-    let start = match std::env::args().nth(1) {
-        Some(s) if is_this_pc_name(&s) => PathBuf::from(THIS_PC),
-        Some(s) => PathBuf::from(s),
-        None => home_path(),
-    };
-    app(|a| a.new_tab(start));
+    let session = if std::env::args().nth(1).is_none() { update::take_session() } else { None };
+    if let Some((active, tabs)) = session {
+        for t in tabs {
+            app(|a| a.new_tab(t));
+        }
+        app(|a| a.select_tab(active, true));
+    } else {
+        let start = match std::env::args().nth(1) {
+            Some(s) if is_this_pc_name(&s) => PathBuf::from(THIS_PC),
+            Some(s) => PathBuf::from(s),
+            None => home_path(),
+        };
+        app(|a| a.new_tab(start));
+    }
     if update::auto_due() {
         app(|a| a.check_update());
     }

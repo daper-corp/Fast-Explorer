@@ -1,6 +1,6 @@
 # AGENTS.md
 
-Fast Explorer(내부 이름 Fex)는 Windows 전용 파일 탐색기입니다. Rust 2024 edition 워크스페이스이고 UI는 Slint로 그립니다. 이 문서는 저장소에서 작업하는 에이전트를 위한 안내입니다. 사용자 대상 설명은 `README.md`에 있습니다.
+Fast Explorer(내부 이름 Fex)는 Windows 전용 파일 탐색기입니다. Rust 2024 edition 워크스페이스이고 UI는 Slint로 그립니다. 이 문서는 저장소에서 작업하는 에이전트를 위한 안내입니다. 사용자 대상 설명은 `README.md`(영어)와 `README.ko.md`(한국어)에 있습니다.
 
 ## 빠른 명령
 

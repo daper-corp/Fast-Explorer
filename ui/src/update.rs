@@ -105,6 +105,31 @@ pub fn mark_checked() {
     save(now(), auto_enabled());
 }
 
+fn session_file() -> Option<PathBuf> {
+    fex_core::shell::roaming_appdata().ok().map(|d| d.join("Fast Explorer").join("session.txt"))
+}
+
+/// Remembers the open tabs (active index first, then one folder per line) across an update.
+pub fn save_session(active: usize, tabs: &[PathBuf]) {
+    let Some(file) = session_file() else { return };
+    let _ = std::fs::create_dir_all(file.parent().unwrap());
+    let body: String = tabs.iter().map(|p| format!("{}
+", p.display())).collect();
+    let _ = std::fs::write(file, format!("{active}
+{body}"));
+}
+
+/// The tabs saved by `save_session`, consumed so it applies to one launch only.
+pub fn take_session() -> Option<(usize, Vec<PathBuf>)> {
+    let file = session_file()?;
+    let text = std::fs::read_to_string(&file).ok()?;
+    let _ = std::fs::remove_file(&file);
+    let mut lines = text.lines();
+    let active = lines.next()?.trim().parse().ok()?;
+    let tabs: Vec<PathBuf> = lines.filter(|l| !l.is_empty()).map(PathBuf::from).collect();
+    (!tabs.is_empty()).then_some((active, tabs))
+}
+
 #[cfg(test)]
 mod tests {
     #[test]

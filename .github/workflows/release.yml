@@ -33,4 +33,5 @@ jobs:
           $setup = "FastExplorer-Setup-$env:VERSION.exe"
           $url = "https://github.com/${{ github.repository }}/releases/download/${{ github.ref_name }}/$setup"
           @{ version = $env:VERSION; url = $url } | ConvertTo-Json | Set-Content target/installer/latest.json -Encoding utf8NoBOM
-          gh release create "${{ github.ref_name }}" "target/installer/$setup" target/installer/latest.json --title "Fast Explorer $env:VERSION" --generate-notes
+          Copy-Item "target/installer/$setup" target/installer/FastExplorer-Setup.exe  # stable name for releases/latest/download/ links
+          gh release create "${{ github.ref_name }}" "target/installer/$setup" target/installer/FastExplorer-Setup.exe target/installer/latest.json --title "Fast Explorer $env:VERSION" --generate-notes
