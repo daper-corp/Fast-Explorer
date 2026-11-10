@@ -453,11 +453,14 @@ pub fn run_elevated(exe: &Path, args: &str, owner: isize) -> io::Result<u32> {
 /// Opens a file with its default handler (or the "Open with" picker).
 pub fn open(path: &Path) -> io::Result<()> {
     let file = HSTRING::from(path.as_os_str());
+    // Start in the file's own folder so scripts (.bat etc.) resolve relative paths like Explorer does.
+    let dir = HSTRING::from(path.parent().map_or(std::ffi::OsStr::new(""), |p| p.as_os_str()));
     with_com(|| unsafe {
         let mut info = SHELLEXECUTEINFOW {
             cbSize: size_of::<SHELLEXECUTEINFOW>() as u32,
             fMask: SEE_MASK_NOASYNC,
             lpFile: PCWSTR(file.as_ptr()),
+            lpDirectory: if dir.is_empty() { PCWSTR::null() } else { PCWSTR(dir.as_ptr()) },
             nShow: SW_SHOWNORMAL.0,
             ..Default::default()
         };
