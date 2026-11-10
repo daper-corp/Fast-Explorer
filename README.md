@@ -1,5 +1,7 @@
 # Fast Explorer (Fex)
 
+한국어 · [English](README.en.md)
+
 Fast Explorer는 Windows용 파일 탐색기입니다. 큰 폴더를 빠르게 나열하고, 탭·히스토리·셸 통합을 제공하며, NTFS MFT/USN 저널을 이용해 모든 드라이브의 파일 이름을 즉시 검색합니다. Rust와 Slint로 만들었습니다.
 
 ## 주요 기능
@@ -169,4 +171,4 @@ cargo test -p fex-index --test live -- --ignored
 
 ## 라이선스
 
-MIT (`Cargo.toml`의 `workspace.package.license`).
+[MIT](LICENSE). 기여 방법은 [CONTRIBUTING.md](CONTRIBUTING.md), 보안 제보는 [SECURITY.md](SECURITY.md)를 참고하세요.

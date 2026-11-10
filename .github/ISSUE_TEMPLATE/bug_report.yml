@@ -1,0 +1,19 @@
+name: 버그 신고 / Bug report
+description: 동작이 이상하거나 충돌합니다 / Something is broken
+labels: [bug]
+body:
+  - type: textarea
+    id: what
+    attributes: {label: 무엇이 문제인가요? / What happened, description: 기대한 동작과 실제 동작 / Expected vs actual}
+    validations: {required: true}
+  - type: textarea
+    id: steps
+    attributes: {label: 재현 방법 / Steps to reproduce}
+    validations: {required: true}
+  - type: input
+    id: version
+    attributes: {label: Fast Explorer 버전 / Version, placeholder: "0.2.0"}
+    validations: {required: true}
+  - type: input
+    id: os
+    attributes: {label: Windows 버전 / Windows version, placeholder: "Windows 11 23H2"}
