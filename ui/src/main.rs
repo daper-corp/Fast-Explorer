@@ -2522,6 +2522,10 @@ impl App {
         for t in self.tabs.borrow().iter() {
             self.reload(t, After::default());
         }
+        self.sync_tabs();
+        self.sync_places();
+        self.update_status_text(&self.tab());
+        self.ui().set_update_status("".into());
     }
 
     // ---------- context menus ----------

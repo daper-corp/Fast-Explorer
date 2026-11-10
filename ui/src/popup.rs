@@ -67,6 +67,16 @@ pub fn own(id: u32, label: impl Into<String>) -> Own {
 /// Verbs we already offer ourselves; hidden from the shell part to avoid duplicates.
 const OWN_VERBS: [&str; 8] = ["open", "cut", "copy", "copyaspath", "paste", "delete", "rename", "properties"];
 
+/// A shell label in Korean when we know its English text (extensions follow the Windows language).
+fn local(label: &str) -> String {
+    let (text, hint) = label.split_once('\t').unwrap_or((label, ""));
+    match fex_core::i18n::lookup(&plain(text)) {
+        Some(ko) if hint.is_empty() => ko,
+        Some(ko) => format!("{ko}\t{hint}"),
+        None => label.to_string(),
+    }
+}
+
 /// "New folder(&N)" -> "New folder": what a menu label reads as, for spotting duplicates.
 fn plain(label: &str) -> String {
     let s = label.split('\t').next().unwrap_or("").replace('&', "");
@@ -296,11 +306,11 @@ unsafe fn add_shell(
                     skip_below = Some(it.depth);
                     continue;
                 };
-                stack[d].append(flags | MF_POPUP, sub.0 as usize, &it.label);
+                stack[d].append(flags | MF_POPUP, sub.0 as usize, &local(&it.label));
                 stack[d].set_last_bitmap(shell_item_bitmap(it), bitmaps);
                 stack.push(Level { menu: sub, pending_sep: false, count: 0 });
             } else {
-                stack[d].append(flags, it.id as usize, &it.label);
+                stack[d].append(flags, it.id as usize, &local(&it.label));
                 stack[d].set_last_bitmap(shell_item_bitmap(it), bitmaps);
                 if it.default {
                     let _ = SetMenuDefaultItem(stack[d].menu, it.id, 0);

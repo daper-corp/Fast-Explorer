@@ -8,10 +8,11 @@ use std::sync::OnceLock;
 
 use windows::Win32::Globalization::GetUserDefaultUILanguage;
 
-const TABLES: [&str; 3] = [
+const TABLES: [&str; 4] = [
     include_str!("../i18n/core.tsv"),
     include_str!("../i18n/ui_main.tsv"),
     include_str!("../i18n/ui_other.tsv"),
+    include_str!("../i18n/shell.tsv"),
 ];
 
 /// Language chosen at runtime: 0 = automatic, 1 = English, 2 = Korean.
@@ -50,14 +51,19 @@ pub fn pairs(table: &str) -> impl Iterator<Item = (String, String)> + '_ {
     })
 }
 
-/// Korean text for `en` (or `en` itself when English is active or no translation exists).
-pub fn tr(en: &str) -> String {
+/// Korean text for a known English `en`, when Korean is active.
+pub fn lookup(en: &str) -> Option<String> {
     if !korean() {
-        return en.to_string();
+        return None;
     }
     static MAP: OnceLock<HashMap<String, String>> = OnceLock::new();
     let map = MAP.get_or_init(|| TABLES.iter().flat_map(|t| pairs(t)).collect());
-    map.get(en).cloned().unwrap_or_else(|| en.to_string())
+    map.get(en).cloned()
+}
+
+/// Korean text for `en` (or `en` itself when English is active or no translation exists).
+pub fn tr(en: &str) -> String {
+    lookup(en).unwrap_or_else(|| en.to_string())
 }
 
 /// Fills `{}` placeholders in order.

@@ -1,0 +1,68 @@
+# Windows shell menu labels (matched without "&" accelerators and shortcut hints).
+Open	열기
+Open with	연결 프로그램
+Open in new tab	새 탭에서 열기
+Open in new window	새 창에서 열기
+Open in Terminal	터미널에서 열기
+Open file location	파일 위치 열기
+Open folder location	폴더 위치 열기
+Pin to Quick access	빠른 실행에 고정
+Unpin from Quick access	빠른 실행에서 제거
+Pin to Start	시작 화면에 고정
+Unpin from Start	시작 화면에서 제거
+Pin to taskbar	작업 표시줄에 고정
+Unpin from taskbar	작업 표시줄에서 제거
+Add to Favorites	즐겨찾기에 추가
+Share	공유
+Send to	보내기
+Compress to ZIP file	ZIP 파일로 압축
+Extract All...	모두 압축 풀기...
+Extract All…	모두 압축 풀기…
+Copy as path	경로로 복사
+Copy path	경로 복사
+Cut	잘라내기
+Copy	복사
+Paste	붙여넣기
+Delete	삭제
+Rename	이름 바꾸기
+Properties	속성
+Restore previous versions	이전 버전 복원
+Give access to	액세스 권한 부여
+Include in library	라이브러리에 포함
+Scan with Microsoft Defender...	Microsoft Defender로 검사...
+Scan with Microsoft Defender…	Microsoft Defender로 검사…
+Edit in Notepad	메모장에서 편집
+Edit	편집
+Print	인쇄
+Set as desktop background	바탕 화면 배경으로 설정
+Rotate right	오른쪽으로 회전
+Rotate left	왼쪽으로 회전
+Cast to Device	디바이스로 캐스트
+New	새로 만들기
+View	보기
+Sort by	정렬 기준
+Group by	그룹화 기준
+Refresh	새로 고침
+Undo	실행 취소
+Redo	다시 실행
+Customize this folder...	이 폴더 사용자 지정...
+Show more options	추가 옵션 표시
+Always keep on this device	항상 이 디바이스에 유지
+Free up space	공간 확보
+Eject	꺼내기
+Format...	포맷...
+Format…	포맷…
+Mount	탑재
+Burn to disc	디스크에 굽기
+Install	설치
+Run as administrator	관리자 권한으로 실행
+Troubleshoot compatibility	호환성 문제 해결
+Pin to Start	시작 화면에 고정
+Create shortcut	바로 가기 만들기
+Map network drive...	네트워크 드라이브 연결...
+Disconnect	연결 끊기
+Folder	폴더
+Shortcut	바로 가기
+Text Document	텍스트 문서
+Compressed (zipped) Folder	압축(ZIP) 폴더
+Bitmap image	비트맵 이미지
