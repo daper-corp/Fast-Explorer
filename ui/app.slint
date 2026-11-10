@@ -600,6 +600,9 @@ component Sidebar inherits Rectangle {
                     remove => {
                         root.remove(p.path);
                     }
+                    menu => {
+                        root.drive-menu(p.path);
+                    }
                     history(d) => {
                         root.history(d);
                     }

@@ -2741,6 +2741,9 @@ impl App {
     /// Sidebar drive right-click: open, eject (removable only), format, properties.
     fn drive_menu(&self, path: &str, at: (i32, i32)) {
         let root = PathBuf::from(path);
+        if !self.drives.borrow().iter().any(|d| same_path(&d.path, &root)) {
+            return self.favorite_menu(root, at);
+        }
         let removable = self.drives.borrow().iter().any(|d| same_path(&d.path, &root) && d.kind == "Removable Disk");
         let fixed_or_removable = self.drives.borrow().iter().any(|d| same_path(&d.path, &root) && matches!(d.kind, "Removable Disk" | "Local Disk"));
         let mut top = vec![
@@ -2766,6 +2769,26 @@ impl App {
                 thread::spawn(move || shell::format_dialog(hwnd, &root));
             }
             CMD_PROPERTIES => self.properties_of(vec![root]),
+            _ => {}
+        }
+    }
+
+    /// Sidebar favorite right-click.
+    fn favorite_menu(&self, path: PathBuf, at: (i32, i32)) {
+        let top = [
+            Own { default: true, ..own(CMD_OPEN, t!("Open")) },
+            with_icon(own(CMD_OPEN_TAB, t!("Open in new tab")), popup::Icon::Glyph(popup::glyph::NEW_TAB)),
+            with_icon(own(CMD_ADD_FAVORITE, t!("Remove from favorites")), popup::Icon::Glyph(popup::glyph::STAR)),
+        ];
+        let bottom = [with_icon(own(CMD_PROPERTIES, t!("Properties")), popup::Icon::Stock(SIID_SETTINGS))];
+        let id = popup::show(self.hwnd(), at, &top, &[], &bottom);
+        self.end_menu_pointer();
+        let s = path.display().to_string();
+        match id {
+            CMD_OPEN => self.open_place(&s),
+            CMD_OPEN_TAB => self.open_place_in_tab(&s),
+            CMD_ADD_FAVORITE => self.remove_favorite(&s),
+            CMD_PROPERTIES => self.properties_of(vec![path]),
             _ => {}
         }
     }
