@@ -2,6 +2,7 @@
 //! "which process is using this?" (File Locksmith).
 
 use super::*;
+use fex_core::t;
 use fex_core::locks::{self, Locker};
 use fex_core::rename::{self, Case, Part, Planned, Rule, Status};
 
@@ -75,9 +76,9 @@ fn refresh_preview(w: &RenameWindow, st: &RefCell<RenameState>) {
                 .collect();
             let ok = plan.iter().filter(|p| p.status == Status::Ok).count();
             let bad = plan.iter().filter(|p| matches!(p.status, Status::Error(_))).count();
-            let mut summary = format!("{}개 중 {ok}개 바뀜", plan.len());
+            let mut summary = t!("{} total, {} changed", plan.len(), ok);
             if bad > 0 {
-                summary.push_str(&format!(" · 문제 {bad}개는 건너뜀"));
+                summary.push_str(&t!(" · {} with problems skipped", bad));
             }
             w.set_summary(summary.into());
             w.set_error("".into());
@@ -138,10 +139,10 @@ impl App {
     pub(super) fn rename_many(&self) {
         let t = self.tab();
         if at_this_pc(&t) {
-            return self.set_note(&t, "내 PC에서는 이름을 바꿀 수 없음".into());
+            return self.set_note(&t, t!("Cannot rename items in This PC"));
         }
         if self.includes_tree_container(&t) {
-            return self.set_note(&t, "폴더 구조 행은 이름을 바꿀 수 없음".into());
+            return self.set_note(&t, t!("Folder structure rows cannot be renamed"));
         }
         let mut sel = t.rows.selection();
         if sel.is_empty() {
@@ -182,7 +183,7 @@ impl App {
                     return;
                 }
                 w.set_busy(true);
-                w.set_summary("이름 바꾸는 중…".into());
+                w.set_summary(t!("Renaming…").into());
                 let hwnd = app(|a| a.hwnd());
                 thread::spawn(move || {
                     let (done, errors) = apply_renames(&pairs, hwnd);
@@ -206,16 +207,16 @@ impl App {
         let select = done.iter().filter_map(|(_, to)| to.file_name().map(|n| n.to_string_lossy().into_owned())).collect();
         if !done.is_empty() {
             self.push_undo(Undo::RenameMany { pairs: done.clone() });
-            self.set_note(&t, format!("{}개 이름 바꿈", done.len()));
+            self.set_note(&t, t!("Renamed {}", done.len()));
             self.reload(&t, After { select, ..Default::default() });
         }
         if !errors.is_empty() {
-            let mut text = format!("{}개 항목의 이름을 바꾸지 못했습니다.\n\n", errors.len());
+            let mut text = t!("Could not rename {} items.\n\n", errors.len());
             text.push_str(&errors.iter().take(8).cloned().collect::<Vec<_>>().join("\n"));
             if errors.len() > 8 {
-                text.push_str(&format!("\n… 외 {}개", errors.len() - 8));
+                text.push_str(&t!("\n… and {} more", errors.len() - 8));
             }
-            text.push_str("\n\n다른 프로세스가 사용 중이면 '사용 중인 프로세스 찾기'로 확인할 수 있습니다.");
+            text.push_str(&t!("\n\nIf another process is using them, use 'Find processes in use' to check."));
             self.alert(text);
         }
     }
@@ -234,7 +235,7 @@ impl App {
         }
         let Ok(win) = LocksWindow::new() else { return };
         let first = paths[0].file_name().map(|n| n.to_string_lossy().into_owned()).unwrap_or_else(|| paths[0].display().to_string());
-        win.set_header(if paths.len() == 1 { format!("대상: {first}") } else { format!("대상: {first} 외 {}개", paths.len() - 1) }.into());
+        win.set_header(if paths.len() == 1 { t!("Target: {}", first) } else { t!("Target: {} and {} more", first, paths.len() - 1) }.into());
         win.on_cancel(|| close_locks());
         win.on_refresh(|| locks_scan());
         win.on_kill(|i| locks_kill(Some(i as usize)));
@@ -273,7 +274,7 @@ fn locks_scan() {
     let Some(win) = locks_window() else { return };
     let paths = LOCKS.with(|l| l.borrow().as_ref().map(|u| u.paths.clone())).unwrap_or_default();
     win.set_busy(true);
-    win.set_status("검색 중…".into());
+    win.set_status(t!("Searching…").into());
     thread::spawn(move || {
         let r = locks::find_paths(&paths);
         post(move |_| locks_found(r));
@@ -286,7 +287,7 @@ fn locks_found(r: io::Result<(Vec<Locker>, bool)>) {
     let (lockers, capped) = match r {
         Ok(v) => v,
         Err(e) => {
-            win.set_status(format!("확인하지 못함: {e}").into());
+            win.set_status(t!("Could not check: {}", e).into());
             (Vec::new(), false)
         }
     };
@@ -295,15 +296,15 @@ fn locks_found(r: io::Result<(Vec<Locker>, bool)>) {
         .map(|l| LockRow {
             name: l.name.clone().into(),
             pid: l.pid.to_string().into(),
-            path: l.exe.as_ref().map(|p| p.display().to_string()).unwrap_or_else(|| "(경로를 읽을 수 없음)".into()).into(),
+            path: l.exe.as_ref().map(|p| p.display().to_string()).unwrap_or_else(|| t!("(path unavailable)")).into(),
             service: l.service,
         })
         .collect();
-    if win.get_status().starts_with("검색") {
+    if win.get_status() == t!("Searching…").as_str() {
         let note = match (lockers.len(), capped) {
-            (0, false) => "사용 중인 프로세스 없음".to_string(),
-            (n, false) => format!("프로세스 {n}개"),
-            (n, true) => format!("프로세스 {n}개 · 파일이 많아 일부만 확인함"),
+            (0, false) => t!("No processes in use"),
+            (n, false) => t!("{} processes", n),
+            (n, true) => t!("{} processes · too many files, only some checked", n),
         };
         win.set_status(note.into());
     }
@@ -331,8 +332,8 @@ fn locks_kill(which: Option<usize>) {
     win.set_busy(true);
     let hwnd = app(|a| a.hwnd());
     let names = targets.iter().take(5).map(|l| l.name.clone()).collect::<Vec<_>>().join(", ");
-    let more = if targets.len() > 5 { format!(" 외 {}개", targets.len() - 5) } else { String::new() };
-    let ask = format!("{names}{more}을(를) 강제 종료할까요?\n\n저장하지 않은 작업은 사라질 수 있습니다.");
+    let more = if targets.len() > 5 { t!(" and {} more", targets.len() - 5) } else { String::new() };
+    let ask = t!("Force quit {}{}?\n\nUnsaved work may be lost.", names, more);
     thread::spawn(move || {
         let mut failed = Vec::new();
         if shell::confirm(hwnd, &ask) {
@@ -343,8 +344,8 @@ fn locks_kill(which: Option<usize>) {
             }
         }
         if !failed.is_empty() {
-            let msg = format!(
-                "종료하지 못한 프로세스가 있습니다.\n\n{}\n\n관리자 권한으로 실행 중인 프로세스는 종료할 수 없을 수 있습니다.",
+            let msg = t!(
+                "Some processes could not be ended.\n\n{}\n\nProcesses running as administrator may not be endable.",
                 failed.join("\n")
             );
             shell::alert(hwnd, &msg);

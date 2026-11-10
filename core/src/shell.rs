@@ -65,7 +65,7 @@ pub fn run(op: &Op, owner: Option<isize>) -> io::Result<bool> {
         }
         match op {
             Op::Copy(src, dst) | Op::Move(src, dst) => {
-                // Pasting into the same folder makes "name - 복사본" like Explorer.
+                // Pasting into the same folder makes "name - Copy" like Explorer.
                 if src.iter().all(|s| s.parent() == Some(dst.as_path())) {
                     flags |= FOF_RENAMEONCOLLISION;
                 }
@@ -280,7 +280,7 @@ unsafe fn restore_bin_item(
 pub fn rename(path: &Path, new_name: &str, owner: Option<isize>) -> io::Result<bool> {
     const INVALID: [char; 9] = ['\\', '/', ':', '*', '?', '"', '<', '>', '|'];
     if new_name.trim().is_empty() || new_name.contains(INVALID) {
-        return Err(io::Error::new(io::ErrorKind::InvalidInput, "이름에 \\ / : * ? \" < > | 를 쓸 수 없음"));
+        return Err(io::Error::new(io::ErrorKind::InvalidInput, crate::t!("A name cannot contain \\ / : * ? \" < > |")));
     }
     let dst = path.with_file_name(new_name);
     let r = unsafe {
@@ -322,33 +322,33 @@ pub fn roaming_appdata() -> io::Result<PathBuf> {
     known_folder(&FOLDERID_RoamingAppData)
 }
 
-/// The user folders Explorer lists under "내 PC", in display order.
+/// The user folders Explorer lists under "This PC", in display order.
 pub fn user_folders() -> Vec<(String, PathBuf)> {
     [
-        ("바탕 화면", &FOLDERID_Desktop),
-        ("다운로드", &FOLDERID_Downloads),
-        ("문서", &FOLDERID_Documents),
-        ("사진", &FOLDERID_Pictures),
-        ("음악", &FOLDERID_Music),
-        ("비디오", &FOLDERID_Videos),
+        ("Desktop", &FOLDERID_Desktop),
+        ("Downloads", &FOLDERID_Downloads),
+        ("Documents", &FOLDERID_Documents),
+        ("Pictures", &FOLDERID_Pictures),
+        ("Music", &FOLDERID_Music),
+        ("Videos", &FOLDERID_Videos),
     ]
     .into_iter()
     .filter_map(|(name, id)| {
         known_folder(id)
             .ok()
             .filter(|path| path.is_dir())
-            .map(|path| (name.to_string(), path))
+            .map(|path| (crate::i18n::tr(name), path))
     })
     .collect()
 }
 
-/// One entry under "내 PC".
+/// One entry under "This PC".
 pub struct Drive {
     /// Root including the trailing backslash, e.g. `C:\`.
     pub path: PathBuf,
-    /// Volume label with the letter, e.g. `로컬 디스크 (C:)`.
+    /// Volume label with the letter, e.g. `Local Disk (C:)`.
     pub title: String,
-    /// Explorer's drive type name, e.g. `로컬 디스크` or `네트워크 드라이브`.
+    /// Explorer's drive type name, e.g. `Local Disk` or `Network Drive` (English key; translate with `tr`).
     pub kind: &'static str,
 }
 
@@ -394,20 +394,66 @@ pub fn drives() -> Vec<Drive> {
         };
         let letter = root.trim_end_matches('\\');
         let kind_name = match kind {
-            DRIVE_REMOVABLE => "이동식 디스크",
-            DRIVE_FIXED => "로컬 디스크",
-            DRIVE_REMOTE => "네트워크 드라이브",
-            DRIVE_CDROM => "CD 드라이브",
-            DRIVE_RAMDISK => "RAM 디스크",
-            _ => "드라이브",
+            DRIVE_REMOVABLE => "Removable Disk",
+            DRIVE_FIXED => "Local Disk",
+            DRIVE_REMOTE => "Network Drive",
+            DRIVE_CDROM => "CD Drive",
+            DRIVE_RAMDISK => "RAM Disk",
+            _ => "Drive",
         };
         let title = match label {
             Some(l) => format!("{l} ({letter})"),
-            None => format!("{kind_name} ({letter})"),
+            None => format!("{} ({letter})", crate::i18n::tr(kind_name)),
         };
         out.push(Drive { path: PathBuf::from(root), title, kind: kind_name });
     }
     out
+}
+
+/// Ejects a removable drive (`E:\`): lock, dismount, then ask the device to let go.
+/// Fails with a readable error if something still has files open on it.
+pub fn eject(root: &Path) -> Result<(), String> {
+    use windows::Win32::Storage::FileSystem::{
+        CreateFileW, FILE_ATTRIBUTE_NORMAL, FILE_SHARE_READ, FILE_SHARE_WRITE, OPEN_EXISTING,
+    };
+    use windows::Win32::System::IO::DeviceIoControl;
+    use windows::Win32::System::Ioctl::{
+        FSCTL_DISMOUNT_VOLUME, FSCTL_LOCK_VOLUME, IOCTL_STORAGE_EJECT_MEDIA, IOCTL_STORAGE_MEDIA_REMOVAL,
+        PREVENT_MEDIA_REMOVAL,
+    };
+    let letter = root.to_string_lossy().chars().next().ok_or_else(|| crate::t!("Invalid drive"))?;
+    let dev = HSTRING::from(format!(r"\\.\{letter}:"));
+    let h = unsafe {
+        CreateFileW(&dev, 0xC000_0000, FILE_SHARE_READ | FILE_SHARE_WRITE, None, OPEN_EXISTING, FILE_ATTRIBUTE_NORMAL, None)
+    }
+    .map_err(|e| crate::t!("Cannot open the drive: {}", e))?;
+    let h = unsafe { Owned::new(h) };
+    let ctl = |code: u32, input: Option<&PREVENT_MEDIA_REMOVAL>| {
+        let mut n = 0u32;
+        unsafe {
+            DeviceIoControl(
+                *h,
+                code,
+                input.map(|p| p as *const _ as *const _),
+                input.map_or(0, |_| size_of::<PREVENT_MEDIA_REMOVAL>() as u32),
+                None,
+                0,
+                Some(&mut n),
+                None,
+            )
+        }
+    };
+    ctl(FSCTL_LOCK_VOLUME, None).map_err(|_| crate::t!("Files are in use, so the drive cannot be ejected"))?;
+    let _ = ctl(FSCTL_DISMOUNT_VOLUME, None);
+    let _ = ctl(IOCTL_STORAGE_MEDIA_REMOVAL, Some(&PREVENT_MEDIA_REMOVAL { PreventMediaRemoval: false }));
+    ctl(IOCTL_STORAGE_EJECT_MEDIA, None).map_err(|e| crate::t!("Eject failed: {}", e))
+}
+
+/// Opens Windows' own Format dialog for the drive.
+pub fn format_dialog(owner: isize, root: &Path) {
+    use windows::Win32::UI::Shell::SHFormatDrive;
+    let Some(c) = root.to_string_lossy().chars().next().map(|c| c.to_ascii_uppercase()) else { return };
+    unsafe { SHFormatDrive(HWND(owner as _), (c as u32).wrapping_sub('A' as u32), windows::Win32::UI::Shell::SHFMT_ID(0xFFFF), windows::Win32::UI::Shell::SHFMT_OPT(0)) };
 }
 
 /// Where the index service is installed (admin-only writable).
@@ -468,14 +514,14 @@ pub fn open(path: &Path) -> io::Result<()> {
     })
 }
 
-/// Creates "새 폴더", "새 폴더 (2)", ... in `dir`; returns the name used.
+/// Creates "New folder", "New folder (2)", ... in `dir`; returns the name used.
 pub fn new_folder(dir: &Path) -> io::Result<String> {
-    new_item(dir, "새 폴더", "", true)
+    new_item(dir, &crate::i18n::tr("New folder"), "", true)
 }
 
-/// Creates an empty "새 텍스트 문서.txt" (or "(2)", ...) in `dir`; returns the name used.
+/// Creates an empty "New Text Document.txt" (or "(2)", ...) in `dir`; returns the name used.
 pub fn new_text_file(dir: &Path) -> io::Result<String> {
-    new_item(dir, "새 텍스트 문서", ".txt", false)
+    new_item(dir, &crate::i18n::tr("New Text Document"), ".txt", false)
 }
 
 /// Never touches an existing item: the first free name wins.
@@ -493,7 +539,7 @@ fn new_item(dir: &Path, base: &str, ext: &str, folder: bool) -> io::Result<Strin
             Err(e) => return Err(e),
         }
     }
-    Err(io::Error::new(io::ErrorKind::AlreadyExists, format!("{base} 이름을 만들 수 없음")))
+    Err(io::Error::new(io::ErrorKind::AlreadyExists, crate::t!("Cannot create the name {}", base)))
 }
 
 /// Explorer's own view settings: (show hidden items, show file name extensions).
@@ -665,10 +711,10 @@ mod tests {
         assert!(run(&Op::Move(vec![a.join("y.txt")], b.clone()), None).unwrap());
         assert!(b.join("y.txt").exists() && !a.join("y.txt").exists());
 
-        assert_eq!(new_folder(&a).unwrap(), "새 폴더");
-        assert_eq!(new_folder(&a).unwrap(), "새 폴더 (2)");
-        assert_eq!(new_text_file(&a).unwrap(), "새 텍스트 문서.txt");
-        assert_eq!(new_text_file(&a).unwrap(), "새 텍스트 문서 (2).txt");
+        assert_eq!(new_folder(&a).unwrap(), crate::i18n::tr("New folder"));
+        assert_eq!(new_folder(&a).unwrap(), format!("{} (2)", crate::i18n::tr("New folder")));
+        assert_eq!(new_text_file(&a).unwrap(), format!("{}.txt", crate::i18n::tr("New Text Document")));
+        assert_eq!(new_text_file(&a).unwrap(), format!("{} (2).txt", crate::i18n::tr("New Text Document")));
 
         assert!(run(&Op::Delete { paths: vec![b.clone()], permanent: true }, None).unwrap());
         assert!(!b.exists());
@@ -717,7 +763,7 @@ mod tests {
         assert!(!drives.is_empty());
         assert!(drives.iter().all(|d| d.path.is_absolute() && !d.title.is_empty() && !d.kind.is_empty()));
         assert!(drives.iter().any(|d| d.path.to_string_lossy().starts_with('C')));
-        let fixed = drives.iter().find(|d| d.kind == "로컬 디스크").expect("a local disk");
+        let fixed = drives.iter().find(|d| d.kind == "Local Disk").expect("a local disk");
         let (free, total) = drive_space(&fixed.path).expect("space of a local disk");
         assert!(free <= total && total > 0);
     }

@@ -1,0 +1,106 @@
+Undone	되돌림
+Free space	여유 공간
+Folder tree rows can't be deleted	폴더 구조 행은 삭제할 수 없음
+Cancelled	취소됨
+You're up to date	최신 버전입니다
+Not found in the Recycle Bin	휴지통에서 찾을 수 없음
+Undo cancelled	되돌리기 취소됨
+Size	크기
+Couldn't undo.	되돌리지 못했습니다.
+Change detected · auto refresh	변경 감지 · 자동 새로 고침
+Unavailable	사용할 수 없음
+Search needs the index service	검색에는 인덱스 서비스가 필요함
+Name	이름
+Date modified	수정한 날짜
+Index service installed · indexing…	인덱스 서비스 설치됨 · 색인 중…
+Search is limited to the current folder and its subfolders	현재 폴더와 그 하위 폴더만 검색할 수 있음
+Can't create new items in search results	검색 결과에서는 새로 만들 수 없음
+ · still indexing, results are partial	 · 색인 중이라 결과가 아직 일부
+Can't paste into This PC	내 PC에는 붙여넣을 수 없음
+Location	위치
+Can't rename in This PC	내 PC에서는 이름을 바꿀 수 없음
+Index service is not installed · run 'fex-index install' as administrator	인덱스 서비스가 설치되지 않음 · 관리자 권한으로 'fex-index install'을 실행하세요
+Loading…	불러오는 중…
+Searching the folder directly, without an index…	색인 없이 폴더를 직접 검색 중…
+Search is only available in folders	폴더에서만 검색할 수 있음
+Update failed	업데이트 실패
+Folder tree rows can't be renamed	폴더 구조 행은 이름을 바꿀 수 없음
+File	파일
+Ejecting…	꺼내는 중…
+The shell menu only works on items in a single folder	셸 메뉴는 한 폴더 안의 항목에만 쓸 수 있음
+Already in favorites	이미 즐겨찾기에 있음
+Couldn't create it.	새로 만들지 못했습니다.
+Loading shell menu…	셸 메뉴 불러오는 중…
+Can't delete in This PC	내 PC에서는 삭제할 수 없음
+Search needs the index service (not installed)	검색에는 인덱스 서비스가 필요함 (설치되지 않음)
+This PC	내 PC
+Added to favorites	즐겨찾기에 추가함
+Drives and folders	드라이브와 폴더
+Enter the full path	전체 경로를 입력하세요
+Nothing to undo	되돌릴 작업 없음
+File folder	파일 폴더
+No files to paste	붙여넣을 파일이 없음
+Checking…	확인 중…
+Can't copy in This PC	내 PC에서는 복사할 수 없음
+Total capacity	전체 용량
+Couldn't complete the operation.	작업을 완료하지 못했습니다.
+The shell menu stopped responding and was restarted	셸 메뉴가 응답하지 않아 다시 시작함
+Couldn't move or copy the files.	파일을 옮기거나 복사하지 못했습니다.
+Type	유형
+Downloading…	다운로드 중…
+Removed from favorites	즐겨찾기에서 제거함
+Can't create new items in This PC	내 PC에서는 새로 만들 수 없음
+Failed: {}	실패: {}
+{} matches	{}개 일치
+{} items	{}개 항목
+ · {} selected	 · {}개 선택
+Can't open: {}	열 수 없음: {}
+Partially read: {}	일부만 읽음: {}
+ · Partially read: {}	 · 일부만 읽음: {}
+Can't refresh: {}	새로 고칠 수 없음: {}
+Can't search: {}	검색할 수 없음: {}
+ · under {}	 · {} 아래
+ · more available, showing the first {}	 · 더 있음, 처음 {}개 표시
+ · stopped at the first {}	 · 처음 {}개에서 멈춤
+Index service install failed (code {})	인덱스 서비스 설치 실패 (코드 {})
+Index service install cancelled: {}	인덱스 서비스 설치 취소: {}
+New version v{} available	새 버전 v{} 있음
+Check failed: {}	확인 실패: {}
+Update failed: {}	업데이트 실패: {}
+Shell menu failed: {}	셸 메뉴 실패: {}
+{} ejected	{} 꺼냄
+Copied {} paths	경로 {}개 복사함
+Clipboard failed: {}	클립보드 실패: {}
+{} file	{} 파일
+{} free	{} 남음
+{} · File	{} · 파일
+Folder not found: {}	폴더를 찾을 수 없음: {}
+Launch failed: {}	실행 실패: {}
+Cut {} items	{}개 잘라냄
+Copied {} items	{}개 복사함
+List {} ms · sort {} ms	목록 {} ms · 정렬 {} ms
+Search {} ms	검색 {} ms
+Folder search {} s	폴더 검색 {} s
+\n\nAnother process may be using the file or folder. Close that program and try again.	\n\n다른 프로세스가 사용 중인 파일이나 폴더일 수 있습니다. 해당 프로그램을 닫고 다시 시도하세요.
+Fast Explorer needs its index service to search every drive instantly.\n\nInstall it now?\n· Administrator permission (UAC) is required.\n· Only file names on fixed NTFS drives are indexed; file contents are never read.\n· Search is only available to this Windows account.	모든 드라이브를 즉시 검색하려면 Fast Explorer 인덱스 서비스가 필요합니다.\n\n지금 설치할까요?\n· 관리자 권한(UAC)이 필요합니다.\n· 고정 NTFS 드라이브의 파일 이름만 색인합니다. 파일 내용은 읽지 않습니다.\n· 검색은 이 Windows 계정에서만 쓸 수 있습니다.
+Version v{} is available (current v{}).\n\nDownload and install it now? Fast Explorer will close during installation.	새 버전 v{}을(를) 사용할 수 있습니다 (현재 v{}).\n\n지금 다운로드하여 설치할까요? 설치 중 Fast Explorer가 닫힙니다.
+Refresh	새로 고침
+Paste	붙여넣기
+New folder	새 폴더
+New text document	새 텍스트 문서
+Search in this folder	이 폴더에서 검색
+Add to favorites	즐겨찾기에 추가
+Open	열기
+Open in new tab	새 탭에서 열기
+Copy path	경로 복사
+Cut	잘라내기
+Copy	복사
+Find processes using it	사용 중인 프로세스 찾기
+Rename	이름 바꾸기
+Delete	삭제
+Rename multiple	여러 이름 바꾸기
+More options…	더 많은 옵션…
+More options (retry)…	더 많은 옵션 (다시 시도)…
+Properties	속성
+Eject	꺼내기
+Format…	포맷…

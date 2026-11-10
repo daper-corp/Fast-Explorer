@@ -30,7 +30,7 @@ pub struct FlatTree {
     pub order: Vec<u32>,
     /// Per node: indentation and expansion state.
     pub metas: Vec<RowMeta>,
-    /// Per node: folder shown in the "위치" column.
+    /// Per node: folder shown in the "Location" column.
     pub locations: Vec<String>,
     /// Matching items that are not hidden (folders included).
     pub hits: usize,

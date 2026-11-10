@@ -47,7 +47,7 @@ pub fn parse(json: &str) -> Option<Release> {
 /// redirect, not the rate-limited REST API (60 requests/hour per IP without a token).
 pub fn check() -> Result<Option<Release>, String> {
     let json = curl(&[&format!("https://github.com/{REPO}/releases/latest/download/latest.json")])?;
-    let rel = parse(&json).ok_or("업데이트 정보를 읽을 수 없습니다")?;
+    let rel = parse(&json).ok_or(fex_core::t!("Could not read the update information"))?;
     Ok(newer(&rel.version, CURRENT).then_some(rel))
 }
 
@@ -59,7 +59,7 @@ fn newer(a: &str, b: &str) -> bool {
 /// Downloads the installer to the temp folder. Only our own repository's release assets.
 pub fn download(rel: &Release) -> Result<PathBuf, String> {
     if !rel.url.starts_with(&format!("https://github.com/{REPO}/releases/download/")) {
-        return Err("예상하지 못한 다운로드 주소".into());
+        return Err(fex_core::t!("Unexpected download address"));
     }
     let file = std::env::temp_dir().join(format!("FastExplorer-Setup-{}.exe", rel.version));
     curl(&["-o", &file.to_string_lossy(), &rel.url])?;

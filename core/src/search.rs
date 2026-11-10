@@ -98,7 +98,7 @@ impl Pattern {
     pub fn compile_mode(query: &str, regex: bool) -> Result<Self, String> {
         let query = query.trim();
         if query.is_empty() {
-            return Err("검색어가 비어 있음".into());
+            return Err(crate::t!("Search query is empty"));
         }
         if regex {
             let source = match query.get(..3).is_some_and(|p| p.eq_ignore_ascii_case("re:")) {
@@ -106,22 +106,22 @@ impl Pattern {
                 false => query,
             };
             if source.trim().is_empty() {
-                return Err("검색어가 비어 있음".into());
+                return Err(crate::t!("Search query is empty"));
             }
             let re = RegexBuilder::new(source)
                 .case_insensitive(true)
                 .build()
-                .map_err(|e| format!("정규식 오류: {e}"))?;
+                .map_err(|e| crate::t!("Regex error: {}", e))?;
             return Ok(Pattern(Inner::Regex(re)));
         }
         if let Some(source) = regex_source(query) {
             if source.trim().is_empty() {
-                return Err("검색어가 비어 있음".into());
+                return Err(crate::t!("Search query is empty"));
             }
             let re = RegexBuilder::new(source)
                 .case_insensitive(true)
                 .build()
-                .map_err(|e| format!("정규식 오류: {e}"))?;
+                .map_err(|e| crate::t!("Regex error: {}", e))?;
             return Ok(Pattern(Inner::Regex(re)));
         }
         let groups: Vec<Vec<Word>> = query
@@ -132,7 +132,7 @@ impl Pattern {
             .filter(|g: &Vec<Word>| !g.is_empty())
             .collect();
         match groups.is_empty() {
-            true => Err("검색어가 비어 있음".into()),
+            true => Err(crate::t!("Search query is empty")),
             false => Ok(Pattern(Inner::Groups(groups))),
         }
     }
@@ -330,7 +330,7 @@ pub fn plan(query: &str, cwd: &Path, scope: &Scope) -> Result<Plan, String> {
 pub fn plan_mode(query: &str, cwd: &Path, scope: &Scope, regex: bool) -> Result<Plan, String> {
     let query = query.trim();
     if query.is_empty() {
-        return Err("검색어가 비어 있음".into());
+        return Err(crate::t!("Search query is empty"));
     }
     // A regular expression is never a path, even when it contains slashes.
     if regex || regex_source(query).is_some() {
@@ -374,7 +374,7 @@ pub fn plan_mode(query: &str, cwd: &Path, scope: &Scope, regex: bool) -> Result<
     // Checking a UNC path could stall on an unreachable server; only local drives are checked.
     let local = is_drive_path(&root);
     if local && !root.is_dir() {
-        return Err(format!("폴더를 찾을 수 없음: {}", root.display()));
+        return Err(crate::t!("Folder not found: {}", root.display()));
     }
     // Typing an existing folder path means "everything inside it"; a trailing name is the pattern.
     let mut pattern = name.to_string();
@@ -479,7 +479,7 @@ mod tests {
         assert!(matches("REP 2024", "Report 2024.docx"));
         assert!(matches("보고", "보고서.hwp"));
         assert!(!matches("report hwp", "Report 2024.docx"));
-        assert_eq!(Pattern::compile("").unwrap_err(), "검색어가 비어 있음");
+        assert_eq!(Pattern::compile("").unwrap_err(), crate::t!("Search query is empty"));
     }
 
     #[test]
@@ -526,7 +526,7 @@ mod tests {
         assert!(!Pattern::compile_mode("^a;b$", false).unwrap().matches("a;b"));
         // The legacy prefix is stripped when the toggle is already on.
         assert!(Pattern::compile_mode("re:^a", true).unwrap().matches("abc"));
-        assert!(Pattern::compile_mode("re:(", true).unwrap_err().starts_with("정규식 오류"));
+        assert!(Pattern::compile_mode("re:(", true).unwrap_err().starts_with(&crate::t!("Regex error: {}", "")));
     }
 
     #[test]
@@ -543,7 +543,7 @@ mod tests {
         assert!(matches(r"re:^report.*\.docx$", "Report 2024.docx"));
         assert!(matches(r"/^report.*\.docx$/", "Report 2024.docx"));
         assert!(!matches(r"re:^report.*\.docx$", "old-report.docx"));
-        assert!(Pattern::compile("re:(").unwrap_err().starts_with("정규식 오류"));
+        assert!(Pattern::compile("re:(").unwrap_err().starts_with(&crate::t!("Regex error: {}", "")));
         assert!(Pattern::compile("re:").is_err());
     }
 

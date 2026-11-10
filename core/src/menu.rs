@@ -216,7 +216,7 @@ impl MenuHost {
         }
         for _ in 0..2 {
             if proc.as_mut().is_none_or(|p| !matches!(p.child.try_wait(), Ok(None))) {
-                *proc = Some(self.spawn().map_err(|e| format!("셸 메뉴 프로세스를 시작할 수 없음: {e}"))?);
+                *proc = Some(self.spawn().map_err(|e| crate::t!("Cannot start the shell menu process: {}", e))?);
             }
             let p = proc.as_mut().unwrap();
             if p.stdin.write_all(line.as_bytes()).and_then(|_| p.stdin.flush()).is_ok() {
@@ -224,7 +224,7 @@ impl MenuHost {
             }
             kill(&mut proc);
         }
-        Err("셸 메뉴 프로세스에 보낼 수 없음".into())
+        Err(crate::t!("Cannot send to the shell menu process"))
     }
 
     /// Waits up to `timeout` for the answer to query `seq`. `None`: not answered yet
@@ -330,7 +330,7 @@ fn read_replies(
         && let Some((seq, _)) = l.asked
         && l.answer.as_ref().is_none_or(|a| a.0 != seq)
     {
-        l.answer = Some((seq, Err("셸 메뉴 프로세스가 종료됨".into())));
+        l.answer = Some((seq, Err(crate::t!("The shell menu process has exited"))));
         cv.notify_all();
     }
 }

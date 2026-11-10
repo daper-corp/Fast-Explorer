@@ -138,7 +138,7 @@ fn exe_of(pid: u32) -> Option<PathBuf> {
 /// Ends the process `locker` describes. Refuses if the PID now belongs to another process.
 pub fn kill(locker: &Locker) -> io::Result<()> {
     if locker.pid <= 4 || locker.pid == unsafe { GetCurrentProcessId() } {
-        return Err(io::Error::new(io::ErrorKind::PermissionDenied, "이 프로세스는 종료할 수 없음"));
+        return Err(io::Error::new(io::ErrorKind::PermissionDenied, crate::t!("This process cannot be terminated")));
     }
     unsafe {
         let h: HANDLE = OpenProcess(PROCESS_TERMINATE | PROCESS_QUERY_LIMITED_INFORMATION, false, locker.pid)?;
@@ -147,7 +147,7 @@ pub fn kill(locker: &Locker) -> io::Result<()> {
         let r = if same {
             TerminateProcess(h, 1).map_err(io::Error::from)
         } else {
-            Err(io::Error::new(io::ErrorKind::NotFound, "프로세스가 이미 종료되었거나 바뀜"))
+            Err(io::Error::new(io::ErrorKind::NotFound, crate::t!("The process has already exited or changed")))
         };
         let _ = CloseHandle(h);
         r

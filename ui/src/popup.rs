@@ -51,23 +51,23 @@ pub mod glyph {
 /// One of our own commands. Ids sit above the shell's range (1..=0x7FFF); id 0 is a separator.
 pub struct Own {
     pub id: u32,
-    /// Text with an optional "\t" shortcut hint, e.g. "복사\tCtrl+C".
-    pub label: &'static str,
+    /// Text with an optional "\t" shortcut hint, e.g. "Copy\tCtrl+C".
+    pub label: String,
     pub default: bool,
     pub disabled: bool,
     pub icon: Option<Icon>,
 }
 
-pub const SEP: Own = Own { id: 0, label: "", default: false, disabled: false, icon: None };
+pub const SEP: Own = Own { id: 0, label: String::new(), default: false, disabled: false, icon: None };
 
-pub const fn own(id: u32, label: &'static str) -> Own {
-    Own { id, label, default: false, disabled: false, icon: None }
+pub fn own(id: u32, label: impl Into<String>) -> Own {
+    Own { id, label: label.into(), default: false, disabled: false, icon: None }
 }
 
 /// Verbs we already offer ourselves; hidden from the shell part to avoid duplicates.
 const OWN_VERBS: [&str; 8] = ["open", "cut", "copy", "copyaspath", "paste", "delete", "rename", "properties"];
 
-/// "새 폴더(&N)" -> "새 폴더": what a menu label reads as, for spotting duplicates.
+/// "New folder(&N)" -> "New folder": what a menu label reads as, for spotting duplicates.
 fn plain(label: &str) -> String {
     let s = label.split('\t').next().unwrap_or("").replace('&', "");
     let s = s.trim();
@@ -87,7 +87,7 @@ pub fn show(hwnd: isize, at: (i32, i32), top: &[Own], items: &[MenuItem], bottom
         let mut root = Level { menu, pending_sep: false, count: 0 };
         root.add_own(top, &mut bitmaps);
         root.pending_sep = true;
-        let seen = top.iter().chain(bottom).filter(|o| o.id != 0).map(|o| plain(o.label)).collect();
+        let seen = top.iter().chain(bottom).filter(|o| o.id != 0).map(|o| plain(&o.label)).collect();
         root = add_shell(root, items, seen, &mut bitmaps);
         root.pending_sep = true;
         root.add_own(bottom, &mut bitmaps);
@@ -243,7 +243,7 @@ impl Level {
                 continue;
             }
             unsafe {
-                self.append(if o.disabled { MF_GRAYED } else { MF_STRING }, o.id as usize, o.label);
+                self.append(if o.disabled { MF_GRAYED } else { MF_STRING }, o.id as usize, &o.label);
                 if o.default {
                     let _ = SetMenuDefaultItem(self.menu, o.id, 0);
                 }

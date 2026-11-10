@@ -86,7 +86,7 @@ fn main() -> Result<()> {
         )?;
 
         // The first menu built in a process lacks the newer (IExplorerCommand / packaged-app)
-        // items such as "터미널에서 열기"; build and discard one so every real reply is complete.
+        // items such as "Open in Terminal"; build and discard one so every real reply is complete.
         let _ = build(hwnd, 0, &Request::Background { seq: 0, folder: std::env::temp_dir() });
 
         let target = hwnd.0 as isize;
@@ -158,7 +158,7 @@ fn handle(hwnd: HWND, req: &Request) {
             let cm = LAST.with(|l| l.borrow().as_ref().filter(|b| b.seq == *seq).map(|b| (b.cm.clone(), b.dir.clone())));
             let r = match cm {
                 Some((cm, dir)) => unsafe { invoke(hwnd, &cm, dir.as_deref(), Verb::Id(*id)) },
-                None => Err(Error::new(E_FAIL, "메뉴가 바뀌었습니다. 다시 열어 주세요.")),
+                None => Err(Error::new(E_FAIL, &fex_core::t!("The menu has changed. Please open it again."))),
             };
             reply_done(*seq, r);
         }
@@ -235,7 +235,7 @@ unsafe fn item_menu(hwnd: HWND, paths: &[PathBuf]) -> Result<IContextMenu> {
     }
 }
 
-/// The menu for a folder's empty space ("새로 만들기", ...).
+/// The menu for a folder's empty space ("New", ...).
 unsafe fn background_menu(hwnd: HWND, folder: &Path) -> Result<IContextMenu> {
     let mut pidls = Pidls(Vec::new());
     unsafe {
@@ -338,7 +338,7 @@ unsafe fn bitmap_icon(bmp: HBITMAP) -> String {
     }
 }
 
-/// Lets handlers fill submenus they populate lazily ("보내기", "새로 만들기", ...).
+/// Lets handlers fill submenus they populate lazily ("Send to", "New", ...).
 unsafe fn init_popup(cm: &IContextMenu, sub: HMENU, pos: u32) {
     let (w, l) = (WPARAM(sub.0 as usize), LPARAM(pos as isize));
     unsafe {

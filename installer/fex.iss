@@ -10,7 +10,7 @@
 AppId={{B7A3F0C2-5D0E-4B8E-9A55-FA57E9B10E01}
 AppName=Fast Explorer
 AppVersion={#AppVersion}
-AppPublisher=daper-corp
+AppPublisher=DAPER
 DefaultDirName={autopf}\Fast Explorer
 DefaultGroupName=Fast Explorer
 UninstallDisplayIcon={app}\fex.exe
@@ -27,12 +27,25 @@ RestartApplications=no
 WizardStyle=modern
 
 [Languages]
+Name: "english"; MessagesFile: "compiler:Default.isl"
 Name: "korean"; MessagesFile: "compiler:Languages\Korean.isl"
 
+[CustomMessages]
+english.DesktopIcon=Create a desktop shortcut
+english.IndexService=Install the index service for whole-disk search (indexes file names only)
+english.DefaultExplorer=Use Fast Explorer as the default file manager (handles opening folders instead of Explorer)
+english.InstallingIndex=Installing the index service...
+english.RunApp=Launch Fast Explorer
+korean.DesktopIcon=바탕 화면 바로 가기 만들기
+korean.IndexService=전체 검색용 인덱스 서비스 설치 (파일 이름만 색인)
+korean.DefaultExplorer=Fast Explorer를 기본 파일 탐색기로 사용 (폴더 열기를 Explorer 대신 처리)
+korean.InstallingIndex=인덱스 서비스 설치 중...
+korean.RunApp=Fast Explorer 실행
+
 [Tasks]
-Name: "desktopicon"; Description: "바탕 화면 바로 가기 만들기"; Flags: unchecked
-Name: "indexsvc"; Description: "전체 검색용 인덱스 서비스 설치 (파일 이름만 색인)"
-Name: "defaultexplorer"; Description: "Fast Explorer를 기본 파일 탐색기로 사용 (폴더 열기를 Explorer 대신 처리)"; Flags: unchecked
+Name: "desktopicon"; Description: "{cm:DesktopIcon}"; Flags: unchecked
+Name: "indexsvc"; Description: "{cm:IndexService}"
+Name: "defaultexplorer"; Description: "{cm:DefaultExplorer}"; Flags: unchecked
 
 [Files]
 Source: "{#Target}\release\fex.exe"; DestDir: "{app}"; Flags: ignoreversion
@@ -54,8 +67,8 @@ Root: HKLM; Subkey: "Software\Classes\Drive\shell\fex\command"; ValueType: strin
 Root: HKLM; Subkey: "Software\Classes\Drive\shell"; ValueType: string; ValueData: "fex"; Tasks: defaultexplorer
 
 [Run]
-Filename: "{app}\fex-index.exe"; Parameters: "install"; Flags: runhidden; Tasks: indexsvc; StatusMsg: "인덱스 서비스 설치 중..."
-Filename: "{app}\fex.exe"; Description: "Fast Explorer 실행"; Flags: nowait postinstall skipifsilent
+Filename: "{app}\fex-index.exe"; Parameters: "install"; Flags: runhidden; Tasks: indexsvc; StatusMsg: "{cm:InstallingIndex}"
+Filename: "{app}\fex.exe"; Description: "{cm:RunApp}"; Flags: nowait postinstall skipifsilent
 
 [UninstallRun]
 Filename: "{app}\fex-index.exe"; Parameters: "uninstall"; Flags: runhidden; RunOnceId: "RemoveIndexService"

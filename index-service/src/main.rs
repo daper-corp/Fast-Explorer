@@ -266,7 +266,7 @@ fn answer(pipe: File, slots: &[Slot]) {
                 Err(e) => writeln!(out, "ERR\t{e}"),
             }
         }
-        None => writeln!(out, "ERR\t알 수 없는 요청"),
+        None => writeln!(out, "ERR\t{}", fex_core::t!("Unknown request")),
     };
     let _ = out.flush();
     unsafe {
@@ -353,7 +353,7 @@ fn install() -> Res<()> {
         account_password: None,
     };
     let service = manager.create_service(&info, ServiceAccess::START | ServiceAccess::CHANGE_CONFIG)?;
-    service.set_description("Fast Explorer의 즉시 파일 이름 검색 (NTFS MFT / USN 저널 색인)")?;
+    service.set_description(&fex_core::t!("Instant file name search for Fast Explorer (NTFS MFT / USN journal index)"))?;
     service.start::<&str>(&[])?;
     println!("installed and started {SERVICE_NAME}");
     Ok(())

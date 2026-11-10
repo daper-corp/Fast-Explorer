@@ -1,0 +1,22 @@
+{} total, {} changed	{}개 중 {}개 바뀜
+ · {} with problems skipped	 · 문제 {}개는 건너뜀
+Cannot rename items in This PC	내 PC에서는 이름을 바꿀 수 없음
+Folder structure rows cannot be renamed	폴더 구조 행은 이름을 바꿀 수 없음
+Renaming…	이름 바꾸는 중…
+Renamed {}	{}개 이름 바꿈
+Could not rename {} items.\n\n	{}개 항목의 이름을 바꾸지 못했습니다.\n\n
+\n… and {} more	\n… 외 {}개
+\n\nIf another process is using them, use 'Find processes in use' to check.	\n\n다른 프로세스가 사용 중이면 '사용 중인 프로세스 찾기'로 확인할 수 있습니다.
+Target: {}	대상: {}
+Target: {} and {} more	대상: {} 외 {}개
+Searching…	검색 중…
+Could not check: {}	확인하지 못함: {}
+(path unavailable)	(경로를 읽을 수 없음)
+No processes in use	사용 중인 프로세스 없음
+{} processes	프로세스 {}개
+{} processes · too many files, only some checked	프로세스 {}개 · 파일이 많아 일부만 확인함
+ and {} more	 외 {}개
+Force quit {}{}?\n\nUnsaved work may be lost.	{}{}을(를) 강제 종료할까요?\n\n저장하지 않은 작업은 사라질 수 있습니다.
+Some processes could not be ended.\n\n{}\n\nProcesses running as administrator may not be endable.	종료하지 못한 프로세스가 있습니다.\n\n{}\n\n관리자 권한으로 실행 중인 프로세스는 종료할 수 없을 수 있습니다.
+Could not read the update information	업데이트 정보를 읽을 수 없습니다
+Unexpected download address	예상하지 못한 다운로드 주소

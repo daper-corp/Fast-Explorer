@@ -14,7 +14,7 @@ export struct Row {
     // Folder of a search hit; empty when browsing a folder.
     location: string,
     icon: image,
-    // 0..1 used share for drive rows in "내 PC"; negative hides the bar.
+    // 0..1 used share for drive rows in @tr("This PC"); negative hides the bar.
     usage: float,
     // Search tree: nesting depth, and whether this folder can expand / is expanded.
     depth: int,
@@ -453,6 +453,7 @@ component PlaceRow inherits Rectangle {
     callback open;
     callback open-tab;
     callback remove;
+    callback menu;
     callback history(int);
 
     height: 30px;
@@ -466,6 +467,9 @@ component PlaceRow inherits Rectangle {
             }
             if e.kind == PointerEventKind.down && e.button == PointerEventButton.middle {
                 root.open-tab();
+            }
+            if e.kind == PointerEventKind.down && e.button == PointerEventButton.right {
+                root.menu();
             }
             if e.kind == PointerEventKind.down && e.button == PointerEventButton.back {
                 root.history(-1);
@@ -526,6 +530,7 @@ component Sidebar inherits Rectangle {
     callback open-tab(string);
     callback add;
     callback remove(string);
+    callback drive-menu(string);
     callback history(int);
 
     private property <brush> dim: Palette.foreground.transparentize(0.4);
@@ -541,7 +546,7 @@ component Sidebar inherits Rectangle {
             padding-left: 6px;
             padding-right: 4px;
             Text {
-                text: "즐겨찾기";
+                text: @tr("Favorites");
                 font-size: 12px;
                 color: root.dim;
                 vertical-alignment: center;
@@ -572,7 +577,7 @@ component Sidebar inherits Rectangle {
             padding-left: 8px;
             padding-top: 2px;
             Text {
-                text: "현재 폴더를 추가하려면 +";
+                text: @tr("Press + to add the current folder");
                 font-size: 11px;
                 color: root.dim;
             }
@@ -614,7 +619,7 @@ component Sidebar inherits Rectangle {
                         x: 8px;
                         y: 0;
                         height: parent.height;
-                        text: "내 PC";
+                        text: @tr("This PC");
                         font-size: 12px;
                         color: root.this-pc-active ? Palette.foreground : root.dim;
                         vertical-alignment: center;
@@ -636,6 +641,9 @@ component Sidebar inherits Rectangle {
                     }
                     open-tab => {
                         root.open-tab(d.path);
+                    }
+                    menu => {
+                        root.drive-menu(d.path);
                     }
                     history(n) => {
                         root.history(n);
@@ -666,7 +674,7 @@ export component AppWindow inherits Window {
         self.crumb-scroll = 0px;
     }
     in property <[Crumb]> crumbs;
-    // The "내 PC" view: drives and user folders instead of a folder listing.
+    // The @tr("This PC") view: drives and user folders instead of a folder listing.
     in property <bool> this-pc;
     in property <string> this-pc-path;
     // Address-bar autocomplete.
@@ -686,7 +694,7 @@ export component AppWindow inherits Window {
     in-out property <bool> search-folders: true;
     in-out property <bool> search-files: true;
     in-out property <bool> search-regex: false;
-    // 0 = 단순 목록, 1 = 트리 구조.
+    // 0 = flat list, 1 = tree.
     in-out property <int> search-view: 0;
     private property <bool> search-options-open: false;
     private property <bool> settings-open: false;
@@ -703,11 +711,11 @@ export component AppWindow inherits Window {
     in property <bool> sort-desc;
     // Widest visible cell in each column, measured by the hidden Text elements below and
     // used to fit a column to its contents on a double-click of the resize handle.
-    in property <string> fit-name: "이름";
-    in property <string> fit-location: "위치";
-    in property <string> fit-date: "수정한 날짜";
-    in property <string> fit-kind: "유형";
-    in property <string> fit-size: "크기";
+    in property <string> fit-name: @tr("Name");
+    in property <string> fit-location: @tr("Location");
+    in property <string> fit-date: @tr("Date modified");
+    in property <string> fit-kind: @tr("Type");
+    in property <string> fit-size: @tr("Size");
     in property <[Place]> favorites;
     in property <[Place]> drives;
     in property <int> drop-row: -1;
@@ -767,6 +775,7 @@ export component AppWindow inherits Window {
     callback place-open-tab(string);
     callback place-add();
     callback place-remove(string);
+    callback drive-menu(string);
     callback history(int);
     callback rubber-start(bool);
     callback rubber-move(length, length);
@@ -1214,8 +1223,8 @@ export component AppWindow inherits Window {
                     width: 340px;
                     enabled: !root.this-pc;
                     placeholder-text: root.this-pc
-                        ? "폴더에서만 검색"
-                        : "검색 (현재+하위) · 공백 AND · ; OR";
+                        ? @tr("Search folders only")
+                        : @tr("Search (current + subfolders) · space AND · ; OR");
                     text <=> root.search-text;
                     edited(t) => {
                         root.search(t);
@@ -1250,6 +1259,9 @@ export component AppWindow inherits Window {
                     }
                     remove(p) => {
                         root.place-remove(p);
+                    }
+                    drive-menu(p) => {
+                        root.drive-menu(p);
                     }
                     history(d) => {
                         root.history(d);
@@ -1292,7 +1304,7 @@ export component AppWindow inherits Window {
                                 min-column-width: 120px;
                                 max-column-width: max(120px, header-bar.width - root.list-margin - 7px - root.blank-right);
                                 fit-width: max(120px, measure-name.preferred-width + 34px);
-                                text: "이름";
+                                text: @tr("Name");
                                 sorted: root.sort-column == 0;
                                 descending: root.sort-desc;
                                 clicked => {
@@ -1310,7 +1322,7 @@ export component AppWindow inherits Window {
                                 min-column-width: 90px;
                                 max-column-width: max(90px, header-bar.width - root.list-margin - 7px - root.blank-right - root.w-name);
                                 fit-width: max(90px, measure-location.preferred-width + 24px);
-                                text: "위치";
+                                text: @tr("Location");
                                 resize(w) => {
                                     root.w-location = w;
                                 }
@@ -1323,7 +1335,7 @@ export component AppWindow inherits Window {
                                 min-column-width: 100px;
                                 max-column-width: max(100px, header-bar.width - root.list-margin - 7px - root.blank-right - root.w-name - (root.show-location ? root.w-location : 0px));
                                 fit-width: max(100px, measure-date.preferred-width + 22px);
-                                text: root.this-pc && !root.search-mode ? "여유 공간" : "수정한 날짜";
+                                text: root.this-pc && !root.search-mode ? @tr("Free space") : @tr("Date modified");
                                 sorted: root.sort-column == 1;
                                 descending: root.sort-desc;
                                 clicked => {
@@ -1341,7 +1353,7 @@ export component AppWindow inherits Window {
                                 min-column-width: 70px;
                                 max-column-width: max(70px, header-bar.width - root.list-margin - 7px - root.blank-right - root.w-name - (root.show-location ? root.w-location : 0px) - root.w-date);
                                 fit-width: max(70px, measure-kind.preferred-width + 22px);
-                                text: "유형";
+                                text: @tr("Type");
                                 sorted: root.sort-column == 2;
                                 descending: root.sort-desc;
                                 clicked => {
@@ -1359,7 +1371,7 @@ export component AppWindow inherits Window {
                                 min-column-width: 70px;
                                 max-column-width: max(70px, header-bar.width - root.list-margin - 7px - root.blank-right - root.w-name - (root.show-location ? root.w-location : 0px) - root.w-date - root.w-kind);
                                 fit-width: max(70px, measure-size.preferred-width + 22px);
-                                text: root.this-pc && !root.search-mode ? "전체 용량" : "크기";
+                                text: root.this-pc && !root.search-mode ? @tr("Total size") : @tr("Size");
                                 sorted: root.sort-column == 3;
                                 descending: root.sort-desc;
                                 clicked => {
@@ -1597,6 +1609,7 @@ export component AppWindow inherits Window {
                                             color: root.dim;
                                         }
                                         if r.usage >= 0.0: Rectangle {
+                                            x: 0px;
                                             y: parent.height - 4px;
                                             height: 3px;
                                             width: parent.width;
@@ -1604,6 +1617,7 @@ export component AppWindow inherits Window {
                                             border-radius: 1.5px;
                                         }
                                         if r.usage >= 0.0: Rectangle {
+                                            x: 0px;
                                             y: parent.height - 4px;
                                             height: 3px;
                                             width: parent.width * r.usage;
@@ -1761,19 +1775,19 @@ export component AppWindow inherits Window {
                 padding: 10px;
                 spacing: 5px;
 
-                Text { text: "검색 옵션"; font-size: 13px; color: Palette.foreground; }
+                Text { text: @tr("Search options"); font-size: 13px; color: Palette.foreground; }
                 Rectangle { height: 2px; }
 
-                Text { text: "검색 대상"; font-size: 12px; color: root.dim; }
+                Text { text: @tr("Search in"); font-size: 12px; color: root.dim; }
                 CheckBox {
-                    text: "폴더";
+                    text: @tr("Folders");
                     checked <=> root.search-folders;
                     changed checked => {
                         root.search-options-changed();
                     }
                 }
                 CheckBox {
-                    text: "파일";
+                    text: @tr("Files");
                     checked <=> root.search-files;
                     changed checked => {
                         root.search-options-changed();
@@ -1782,9 +1796,9 @@ export component AppWindow inherits Window {
 
                 Rectangle { height: 4px; }
 
-                Text { text: "패턴"; font-size: 12px; color: root.dim; }
+                Text { text: @tr("Pattern"); font-size: 12px; color: root.dim; }
                 CheckBox {
-                    text: "정규식";
+                    text: @tr("Regex");
                     checked <=> root.search-regex;
                     changed checked => {
                         root.search-options-changed();
@@ -1793,9 +1807,9 @@ export component AppWindow inherits Window {
 
                 Rectangle { height: 4px; }
 
-                Text { text: "결과 보기"; font-size: 12px; color: root.dim; }
+                Text { text: @tr("Results view"); font-size: 12px; color: root.dim; }
                 OptionChoice {
-                    text: "단순 목록";
+                    text: @tr("Flat list");
                     selected: root.search-view == 0;
                     clicked => {
                         root.search-view = 0;
@@ -1803,7 +1817,7 @@ export component AppWindow inherits Window {
                     }
                 }
                 OptionChoice {
-                    text: "트리 구조";
+                    text: @tr("Tree");
                     selected: root.search-view == 1;
                     clicked => {
                         root.search-view = 1;
@@ -1840,26 +1854,26 @@ export component AppWindow inherits Window {
                 padding: 10px;
                 spacing: 5px;
 
-                Text { text: "설정"; font-size: 13px; color: Palette.foreground; }
+                Text { text: @tr("Settings"); font-size: 13px; color: Palette.foreground; }
                 Rectangle { height: 2px; }
 
-                Text { text: "보기"; font-size: 12px; color: root.dim; }
+                Text { text: @tr("View"); font-size: 12px; color: root.dim; }
                 CheckBox {
-                    text: "숨긴 항목 표시";
+                    text: @tr("Show hidden items");
                     checked <=> root.show-hidden;
                     changed checked => {
                         root.view-changed();
                     }
                 }
                 CheckBox {
-                    text: "파일 확장명 표시";
+                    text: @tr("Show file extensions");
                     checked <=> root.show-ext;
                     changed checked => {
                         root.view-changed();
                     }
                 }
                 CheckBox {
-                    text: "폴더를 트리로 보기";
+                    text: @tr("Show folders as a tree");
                     checked <=> root.tree-view;
                     changed checked => {
                         root.view-changed();
@@ -1868,10 +1882,10 @@ export component AppWindow inherits Window {
 
                 Rectangle { height: 4px; }
 
-                Text { text: "기본 폴더 (시작·새 탭)"; font-size: 12px; color: root.dim; }
+                Text { text: @tr("Default folder (startup · new tab)"); font-size: 12px; color: root.dim; }
                 home-edit := LineEdit {
                     text <=> root.home-path;
-                    placeholder-text: "C:\\ (비우면 기본값)";
+                    placeholder-text: @tr("C:\\ (leave empty for default)");
                     edited(text) => {
                         root.home-changed(text);
                     }
@@ -1879,13 +1893,13 @@ export component AppWindow inherits Window {
                 HorizontalLayout {
                     spacing: 8px;
                     Button {
-                        text: "현재 폴더로";
+                        text: @tr("Use current folder");
                         clicked => {
                             root.home-use-current();
                         }
                     }
                     Button {
-                        text: "초기화";
+                        text: @tr("Reset");
                         clicked => {
                             root.home-path = "";
                             root.home-changed("");
@@ -1895,10 +1909,10 @@ export component AppWindow inherits Window {
 
                 Rectangle { height: 4px; }
 
-                Text { text: "업데이트"; font-size: 12px; color: root.dim; }
+                Text { text: @tr("Updates"); font-size: 12px; color: root.dim; }
                 Text { text: "Fast Explorer v" + root.app-version; color: Palette.foreground; }
                 CheckBox {
-                    text: "자동으로 업데이트 확인 (하루 한 번)";
+                    text: @tr("Check for updates automatically (once a day)");
                     checked <=> root.auto-update;
                     changed checked => {
                         root.auto-update-changed();
@@ -1907,7 +1921,7 @@ export component AppWindow inherits Window {
                 HorizontalLayout {
                     spacing: 8px;
                     Button {
-                        text: "지금 확인";
+                        text: @tr("Check now");
                         clicked => {
                             root.check-update();
                         }
@@ -1988,7 +2002,7 @@ export struct RenameRow {
 }
 
 export component RenameWindow inherits Window {
-    title: "여러 항목 이름 바꾸기";
+    title: @tr("Rename multiple items");
     icon: @image-url("assets/icon-256.png");
     preferred-width: 780px;
     preferred-height: 600px;
@@ -2001,9 +2015,9 @@ export component RenameWindow inherits Window {
     in-out property <bool> use-regex: false;
     in-out property <bool> match-case: false;
     in-out property <bool> replace-all: true;
-    // 0 = 이름(확장자 제외), 1 = 확장자, 2 = 전체
+    // 0 = name (without extension), 1 = extension, 2 = whole name
     in-out property <int> part: 0;
-    // 0 = 그대로, 1 = 소문자, 2 = 대문자
+    // 0 = keep, 1 = lowercase, 2 = uppercase
     in-out property <int> case-mode: 0;
     in property <[RenameRow]> rows;
     in property <string> summary;
@@ -2030,19 +2044,19 @@ export component RenameWindow inherits Window {
             GridLayout {
                 spacing: 8px;
                 Row {
-                    Text { text: "찾을 내용"; vertical-alignment: center; color: Palette.foreground; }
+                    Text { text: @tr("Find"); vertical-alignment: center; color: Palette.foreground; }
                     LineEdit {
                         text <=> root.find;
-                        placeholder-text: "비워 두면 대/소문자만 바꿈";
+                        placeholder-text: @tr("If empty, only the case is changed");
                         edited => { root.changed(); }
                         accepted => { if root.can-apply { root.apply(); } }
                     }
                 }
                 Row {
-                    Text { text: "바꿀 내용"; vertical-alignment: center; color: Palette.foreground; }
+                    Text { text: @tr("Replace with"); vertical-alignment: center; color: Palette.foreground; }
                     LineEdit {
                         text <=> root.replace;
-                        placeholder-text: "{n} = 번호, {n:3} = 001  (정규식: $1, $2)";
+                        placeholder-text: @tr("{{n}} = number, {{n:3}} = 001  (regex: $1, $2)");
                         edited => { root.changed(); }
                         accepted => { if root.can-apply { root.apply(); } }
                     }
@@ -2052,17 +2066,17 @@ export component RenameWindow inherits Window {
             HorizontalLayout {
                 spacing: 16px;
                 CheckBox {
-                    text: "정규식";
+                    text: @tr("Regex");
                     checked <=> root.use-regex;
                     toggled => { root.changed(); }
                 }
                 CheckBox {
-                    text: "대/소문자 구분";
+                    text: @tr("Match case");
                     checked <=> root.match-case;
                     toggled => { root.changed(); }
                 }
                 CheckBox {
-                    text: "모두 바꾸기";
+                    text: @tr("Replace all");
                     checked <=> root.replace-all;
                     toggled => { root.changed(); }
                 }
@@ -2071,15 +2085,15 @@ export component RenameWindow inherits Window {
             HorizontalLayout {
                 spacing: 4px;
                 alignment: start;
-                Text { text: "적용 대상"; vertical-alignment: center; color: Palette.foreground; width: 64px; }
-                OptionChoice { width: 110px; text: "이름"; selected: root.part == 0; clicked => { root.part = 0; root.changed(); } }
-                OptionChoice { width: 90px; text: "확장자"; selected: root.part == 1; clicked => { root.part = 1; root.changed(); } }
-                OptionChoice { width: 90px; text: "전체"; selected: root.part == 2; clicked => { root.part = 2; root.changed(); } }
+                Text { text: @tr("Apply to"); vertical-alignment: center; color: Palette.foreground; width: 64px; }
+                OptionChoice { width: 110px; text: @tr("Name"); selected: root.part == 0; clicked => { root.part = 0; root.changed(); } }
+                OptionChoice { width: 90px; text: @tr("Extension"); selected: root.part == 1; clicked => { root.part = 1; root.changed(); } }
+                OptionChoice { width: 90px; text: @tr("All"); selected: root.part == 2; clicked => { root.part = 2; root.changed(); } }
                 Rectangle { width: 24px; }
-                Text { text: "대/소문자"; vertical-alignment: center; color: Palette.foreground; width: 64px; }
-                OptionChoice { width: 80px; text: "유지"; selected: root.case-mode == 0; clicked => { root.case-mode = 0; root.changed(); } }
-                OptionChoice { width: 80px; text: "소문자"; selected: root.case-mode == 1; clicked => { root.case-mode = 1; root.changed(); } }
-                OptionChoice { width: 80px; text: "대문자"; selected: root.case-mode == 2; clicked => { root.case-mode = 2; root.changed(); } }
+                Text { text: @tr("Case"); vertical-alignment: center; color: Palette.foreground; width: 64px; }
+                OptionChoice { width: 80px; text: @tr("Keep"); selected: root.case-mode == 0; clicked => { root.case-mode = 0; root.changed(); } }
+                OptionChoice { width: 80px; text: @tr("Lowercase"); selected: root.case-mode == 1; clicked => { root.case-mode = 1; root.changed(); } }
+                OptionChoice { width: 80px; text: @tr("Uppercase"); selected: root.case-mode == 2; clicked => { root.case-mode = 2; root.changed(); } }
             }
 
             Text {
@@ -2141,11 +2155,11 @@ export component RenameWindow inherits Window {
                     color: Palette.foreground.transparentize(0.3);
                 }
                 Button {
-                    text: "취소";
+                    text: @tr("Cancel");
                     clicked => { root.cancel(); }
                 }
                 Button {
-                    text: "이름 바꾸기";
+                    text: @tr("Rename");
                     primary: true;
                     enabled: root.can-apply && !root.busy;
                     clicked => { root.apply(); }
@@ -2165,7 +2179,7 @@ export struct LockRow {
 }
 
 export component LocksWindow inherits Window {
-    title: "사용 중인 프로세스";
+    title: @tr("Processes in use");
     icon: @image-url("assets/icon-256.png");
     preferred-width: 640px;
     preferred-height: 420px;
@@ -2218,7 +2232,7 @@ export component LocksWindow inherits Window {
                                 horizontal-stretch: 1;
                                 alignment: center;
                                 Text {
-                                    text: r.name + "  (PID " + r.pid + ")" + (r.service ? "  · 서비스" : "");
+                                    text: r.name + "  (PID " + r.pid + ")" + (r.service ? @tr("  · service") : "");
                                     overflow: elide;
                                     color: Palette.foreground;
                                 }
@@ -2230,7 +2244,7 @@ export component LocksWindow inherits Window {
                                 }
                             }
                             Button {
-                                text: "종료";
+                                text: @tr("End");
                                 enabled: !root.busy;
                                 clicked => { root.kill(i); }
                             }
@@ -2238,7 +2252,7 @@ export component LocksWindow inherits Window {
                     }
                 }
                 if root.rows.length == 0: Text {
-                    text: root.busy ? "검색 중…" : "사용 중인 프로세스가 없습니다";
+                    text: root.busy ? @tr("Searching…") : @tr("No processes are using it");
                     horizontal-alignment: center;
                     vertical-alignment: center;
                     color: Palette.foreground.transparentize(0.4);
@@ -2255,17 +2269,17 @@ export component LocksWindow inherits Window {
                     color: Palette.foreground.transparentize(0.3);
                 }
                 Button {
-                    text: "새로 고침";
+                    text: @tr("Refresh");
                     enabled: !root.busy;
                     clicked => { root.refresh(); }
                 }
                 Button {
-                    text: "모두 종료";
+                    text: @tr("End all");
                     enabled: !root.busy && root.rows.length > 0;
                     clicked => { root.kill-all(); }
                 }
                 Button {
-                    text: "닫기";
+                    text: @tr("Close");
                     primary: true;
                     clicked => { root.cancel(); }
                 }

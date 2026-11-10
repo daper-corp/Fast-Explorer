@@ -1,0 +1,176 @@
+msgid ""
+msgstr ""
+"Content-Type: text/plain; charset=UTF-8\n"
+"Language: ko\n"
+
+msgid "  · service"
+msgstr "  · 서비스"
+
+msgid "C:\\ (leave empty for default)"
+msgstr "C:\\ (비우면 기본값)"
+
+msgid "{{n}} = number, {{n:3}} = 001  (regex: $1, $2)"
+msgstr "{n} = 번호, {n:3} = 001  (정규식: $1, $2)"
+
+msgid "Search (current + subfolders) · space AND · ; OR"
+msgstr "검색 (현재+하위) · 공백 AND · ; OR"
+
+msgid "Search in"
+msgstr "검색 대상"
+
+msgid "Search options"
+msgstr "검색 옵션"
+
+msgid "Searching…"
+msgstr "검색 중…"
+
+msgid "Results view"
+msgstr "결과 보기"
+
+msgid "Default folder (startup · new tab)"
+msgstr "기본 폴더 (시작·새 탭)"
+
+msgid "This PC"
+msgstr "내 PC"
+
+msgid "Flat list"
+msgstr "단순 목록"
+
+msgid "Close"
+msgstr "닫기"
+
+msgid "Match case"
+msgstr "대/소문자 구분"
+
+msgid "Case"
+msgstr "대/소문자"
+
+msgid "Uppercase"
+msgstr "대문자"
+
+msgid "Replace all"
+msgstr "모두 바꾸기"
+
+msgid "End all"
+msgstr "모두 종료"
+
+msgid "Replace with"
+msgstr "바꿀 내용"
+
+msgid "View"
+msgstr "보기"
+
+msgid "If empty, only the case is changed"
+msgstr "비워 두면 대/소문자만 바꿈"
+
+msgid "Processes in use"
+msgstr "사용 중인 프로세스"
+
+msgid "No processes are using it"
+msgstr "사용 중인 프로세스가 없습니다"
+
+msgid "Refresh"
+msgstr "새로 고침"
+
+msgid "Settings"
+msgstr "설정"
+
+msgid "Lowercase"
+msgstr "소문자"
+
+msgid "Date modified"
+msgstr "수정한 날짜"
+
+msgid "Show hidden items"
+msgstr "숨긴 항목 표시"
+
+msgid "Updates"
+msgstr "업데이트"
+
+msgid "Rename multiple items"
+msgstr "여러 항목 이름 바꾸기"
+
+msgid "Free space"
+msgstr "여유 공간"
+
+msgid "Location"
+msgstr "위치"
+
+msgid "Keep"
+msgstr "유지"
+
+msgid "Type"
+msgstr "유형"
+
+msgid "Rename"
+msgstr "이름 바꾸기"
+
+msgid "Name"
+msgstr "이름"
+
+msgid "Check for updates automatically (once a day)"
+msgstr "자동으로 업데이트 확인 (하루 한 번)"
+
+msgid "Apply to"
+msgstr "적용 대상"
+
+msgid "Total size"
+msgstr "전체 용량"
+
+msgid "All"
+msgstr "전체"
+
+msgid "Regex"
+msgstr "정규식"
+
+msgid "End"
+msgstr "종료"
+
+msgid "Favorites"
+msgstr "즐겨찾기"
+
+msgid "Check now"
+msgstr "지금 확인"
+
+msgid "Find"
+msgstr "찾을 내용"
+
+msgid "Reset"
+msgstr "초기화"
+
+msgid "Cancel"
+msgstr "취소"
+
+msgid "Size"
+msgstr "크기"
+
+msgid "Tree"
+msgstr "트리 구조"
+
+msgid "Show file extensions"
+msgstr "파일 확장명 표시"
+
+msgid "Files"
+msgstr "파일"
+
+msgid "Pattern"
+msgstr "패턴"
+
+msgid "Folders"
+msgstr "폴더"
+
+msgid "Show folders as a tree"
+msgstr "폴더를 트리로 보기"
+
+msgid "Search folders only"
+msgstr "폴더에서만 검색"
+
+msgid "Use current folder"
+msgstr "현재 폴더로"
+
+msgid "Press + to add the current folder"
+msgstr "현재 폴더를 추가하려면 +"
+
+msgid "Extension"
+msgstr "확장자"
+

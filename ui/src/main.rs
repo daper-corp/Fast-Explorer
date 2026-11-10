@@ -15,6 +15,7 @@ use fex_core::index::{self, QueryError, Results};
 use fex_core::menu::{HANG_LIMIT, MenuHost, MenuItem, MenuResult, Request};
 use fex_core::search::{self, Pattern, Scope};
 use fex_core::shell::{self, Op};
+use fex_core::t;
 use fex_core::watch;
 use fex_core::{Entry, SortKey, format_filetime, format_size, list_dir, sort_order};
 use popup::{Own, SEP, own};
@@ -72,6 +73,8 @@ const CMD_ADD_FAVORITE: u32 = 0x800F;
 const CMD_SEARCH_HERE: u32 = 0x8010;
 const CMD_RENAME_MANY: u32 = 0x8011;
 const CMD_LOCKS: u32 = 0x8012;
+const CMD_EJECT: u32 = 0x8013;
+const CMD_FORMAT: u32 = 0x8014;
 
 /// How long a right-click waits for a shell menu that isn't prefetched yet.
 const MENU_WAIT: Duration = Duration::from_millis(150);
@@ -79,35 +82,35 @@ const MENU_WAIT: Duration = Duration::from_millis(150);
 /// Most search hits shown (the status bar says how many matched in all).
 const SEARCH_LIMIT: usize = 2000;
 
-/// The shell namespace path of "내 PC". It cannot collide with a file-system path.
+/// The shell namespace path of "This PC". It cannot collide with a file-system path.
 const THIS_PC: &str = r"::{20D04FE0-3AEA-1069-A2D8-08002B30309D}";
-/// FILE_ATTRIBUTE_DIRECTORY, for the synthetic rows of the "내 PC" view.
+/// FILE_ATTRIBUTE_DIRECTORY, for the synthetic rows of the "This PC" view.
 const ATTR_DIR: u32 = 0x10;
 
 fn is_this_pc(path: &Path) -> bool {
     path.to_string_lossy().eq_ignore_ascii_case(THIS_PC)
 }
 
-/// The tab is showing the virtual "내 PC" rows (not search results opened from it).
+/// The tab is showing the virtual "This PC" rows (not search results opened from it).
 fn at_this_pc(t: &Tab) -> bool {
     t.search.borrow().is_none() && is_this_pc(&t.cwd.borrow())
 }
 
-/// "내 PC", "내PC", "this pc" (any case) are all accepted in the address bar.
+/// "this pc" (any case), the localized name and the Korean "내 PC"/"내PC" are all accepted in the address bar.
 fn is_this_pc_name(text: &str) -> bool {
     let t = text.trim().to_lowercase();
-    t == "내 pc" || t == "내pc" || t == "this pc" || t == "thispc" || t == THIS_PC.to_lowercase()
+    t == "내 pc" || t == "내pc" || t == "this pc" || t == "thispc" || t == THIS_PC.to_lowercase() || t == t!("This PC").to_lowercase()
 }
 
-/// Drives and user folders shown by the "내 PC" view, built off the UI thread.
+/// Drives and user folders shown by the "This PC" view, built off the UI thread.
 #[derive(Clone)]
 struct ThisPcRow {
     title: String,
     path: PathBuf,
     kind: String,
-    /// "여유 공간" column.
+    /// "Free space" column.
     date: String,
-    /// "전체 용량" column.
+    /// "Total capacity" column.
     size: String,
     usage: f32,
     free: u64,
@@ -139,11 +142,11 @@ struct Rows {
     editing: Cell<Option<u32>>,
     /// Folder of each entry, for search hits (empty when listing a folder).
     locations: RefCell<Vec<String>>,
-    /// Search-tree display facts (empty when listing a folder or showing "내 PC").
+    /// Search-tree display facts (empty when listing a folder or showing "This PC").
     meta: RefCell<Vec<RowMeta>>,
-    /// The "트리 보기" folder tree over `entries`; dropped whenever the entries are replaced.
+    /// The "Tree view" folder tree over `entries`; dropped whenever the entries are replaced.
     browse: RefCell<Option<SearchTree>>,
-    /// Per-entry overrides used by the virtual "내 PC" view. They stay empty for real folders,
+    /// Per-entry overrides used by the virtual "This PC" view. They stay empty for real folders,
     /// so row_data falls back to the entry itself.
     paths: RefCell<Vec<String>>,
     kinds: RefCell<Vec<String>>,
@@ -318,7 +321,7 @@ impl Rows {
         self.notify.reset();
     }
 
-    /// Replaces the model with the synthetic "내 PC" rows and their per-row columns.
+    /// Replaces the model with the synthetic "This PC" rows and their per-row columns.
     fn replace_virtual(
         &self,
         entries: Vec<Entry>,
@@ -405,7 +408,7 @@ enum Hist {
     Go(usize),
 }
 
-/// Records a visit in the tab's history (both real folders and the virtual "내 PC").
+/// Records a visit in the tab's history (both real folders and the virtual "This PC").
 fn record_history(t: &Tab, path: &Path, hist: Hist) {
     let mut h = t.history.borrow_mut();
     match hist {
@@ -572,7 +575,7 @@ impl Tab {
     fn title(&self) -> String {
         let cwd = self.cwd.borrow();
         if is_this_pc(&cwd) {
-            return "내 PC".into();
+            return t!("This PC").into();
         }
         match cwd.file_name() {
             Some(n) => n.to_string_lossy().into_owned(),
@@ -603,7 +606,7 @@ struct App {
     menu_seq: Cell<u64>,
     /// The menu last requested from the host: (background?, paths, seq).
     prefetched: RefCell<Option<(bool, Vec<PathBuf>, u64)>>,
-    /// Waiting for "더 많은 옵션"; no other query may supersede it meanwhile.
+    /// Waiting for "More options"; no other query may supersede it meanwhile.
     menu_busy: Cell<bool>,
     /// The newest search; workers for older ones stop and their results are dropped.
     search_seq: Arc<AtomicU64>,
@@ -807,7 +810,7 @@ impl App {
         let cwd = t.cwd.borrow().clone();
         let this_pc = is_this_pc(&cwd);
         ui.set_this_pc(this_pc);
-        ui.set_path(if this_pc { "내 PC".to_string() } else { cwd.display().to_string() }.into());
+        ui.set_path(if this_pc { t!("This PC") } else { cwd.display().to_string() }.into());
         ui.set_crumbs(ModelRc::from(Rc::new(VecModel::from(crumbs_for(&cwd)))));
         ui.set_folder(t.title().into());
         let (pos, len) = (t.hist_pos.get(), t.history.borrow().len());
@@ -845,8 +848,8 @@ impl App {
 
     fn place(&self, path: &Path, cwd: &Path, removable: bool) -> Place {
         let title = match () {
-            _ if self.desktop.as_deref().is_some_and(|d| same_path(d, path)) => "바탕 화면".into(),
-            _ if self.downloads.as_deref().is_some_and(|d| same_path(d, path)) => "다운로드".into(),
+            _ if self.desktop.as_deref().is_some_and(|d| same_path(d, path)) => t!("Desktop").into(),
+            _ if self.downloads.as_deref().is_some_and(|d| same_path(d, path)) => t!("Downloads").into(),
             _ => path
                 .file_name()
                 .map(|n| n.to_string_lossy().into_owned())
@@ -905,13 +908,13 @@ impl App {
             save_favorites(&favorites);
             drop(favorites);
             self.sync_places();
-            self.set_note(&self.tab(), "즐겨찾기에서 제거함".into());
+            self.set_note(&self.tab(), t!("Removed from favorites"));
         } else {
             favorites.push(cwd);
             save_favorites(&favorites);
             drop(favorites);
             self.sync_places();
-            self.set_note(&self.tab(), "즐겨찾기에 추가함".into());
+            self.set_note(&self.tab(), t!("Added to favorites"));
         }
     }
 
@@ -924,13 +927,13 @@ impl App {
             let mut favorites = self.favorites.borrow_mut();
             if favorites.iter().any(|p| same_path(p, &path)) {
                 drop(favorites);
-                return self.set_note(&t, "이미 즐겨찾기에 있음".into());
+                return self.set_note(&t, t!("Already in favorites"));
             }
             favorites.push(path);
             save_favorites(&favorites);
         }
         self.sync_places();
-        self.set_note(&t, "즐겨찾기에 추가함".into());
+        self.set_note(&t, t!("Added to favorites"));
     }
 
     fn remove_favorite(&self, path: &str) {
@@ -952,11 +955,11 @@ impl App {
         };
         let sel = t.rows.selected.borrow().iter().filter(|&&s| s).count();
         let mut s = match search {
-            true => format!("{n}개 일치"),
-            false => format!("{n}개 항목"),
+            true => t!("{} matches", n),
+            false => t!("{} items", n),
         };
         if sel > 0 {
-            s += &format!(" · {sel}개 선택");
+            s += &t!(" · {} selected", sel);
         }
         let note = t.note.borrow();
         if !note.is_empty() {
@@ -1002,10 +1005,10 @@ impl App {
         let busy = matches!(e.raw_os_error(), Some(32 | 33));
         let mut text = format!("{what}\n\n{e}");
         if busy {
-            text.push_str("\n\n다른 프로세스가 사용 중인 파일이나 폴더일 수 있습니다. 해당 프로그램을 닫고 다시 시도하세요.");
+            text.push_str(&t!("\n\nAnother process may be using the file or folder. Close that program and try again."));
         }
         self.alert(text);
-        self.set_note(t, format!("실패: {e}"));
+        self.set_note(t, t!("Failed: {}", e));
     }
 
     fn alert(&self, text: String) {
@@ -1025,7 +1028,7 @@ impl App {
         let seq = self.suggest_seq.fetch_add(1, SeqCst) + 1;
         let latest = self.suggest_seq.clone();
         let cwd = self.tab().cwd.borrow().clone();
-        // From "내 PC" a bare relative name is not meaningful; suggest from the system drive.
+        // From "This PC" a bare relative name is not meaningful; suggest from the system drive.
         let cwd = if is_this_pc(&cwd) { PathBuf::from(r"C:\") } else { cwd };
         let text = text.to_string();
         thread::spawn(move || {
@@ -1069,7 +1072,7 @@ impl App {
         let epoch = t.epoch.fetch_add(1, SeqCst) + 1;
         t.refresh_due.set(false);
         *t.pending.borrow_mut() = Some((path.clone(), hist, after));
-        self.set_note(t, "불러오는 중…".into());
+        self.set_note(t, t!("Loading…"));
         let (id, cancel) = (t.id, t.epoch.clone());
         thread::spawn(move || {
             let start = Instant::now();
@@ -1108,7 +1111,7 @@ impl App {
         self.sync_view(t);
     }
 
-    /// Shows the virtual "내 PC" view: user folders and mounted drives with their free space.
+    /// Shows the virtual "This PC" view: user folders and mounted drives with their free space.
     fn open_this_pc(&self, t: &Rc<Tab>, hist: Hist, after: Option<After>) {
         t.pending.take();
         t.search.take();
@@ -1143,7 +1146,7 @@ impl App {
         let epoch = t.epoch.fetch_add(1, SeqCst) + 1;
         t.refresh_due.set(false);
         let id = t.id;
-        self.set_note(t, "불러오는 중…".into());
+        self.set_note(t, t!("Loading…"));
         thread::spawn(move || {
             let drives = shell::drives();
             let rows = build_this_pc_rows(&drives);
@@ -1183,7 +1186,7 @@ impl App {
         self.update_status(t);
     }
 
-    /// A device was added or removed: refresh the sidebar and the "내 PC" view once the
+    /// A device was added or removed: refresh the sidebar and the "This PC" view once the
     /// burst of WM_DEVICECHANGE messages settles.
     fn devices_changed(&self) {
         if self.devices_due.replace(true) {
@@ -1204,7 +1207,7 @@ impl App {
     fn drives_refreshed(&self, drives: Vec<shell::Drive>, rows: Vec<ThisPcRow>) {
         *self.drives.borrow_mut() = drives;
         self.sync_places();
-        // Refresh every tab that is showing "내 PC" (search results and pending navigations
+        // Refresh every tab that is showing "This PC" (search results and pending navigations
         // bring their own contents and are left alone).
         let ids: Vec<u64> = self
             .tabs
@@ -1245,9 +1248,9 @@ impl App {
         if let Some(e) = err {
             if t.pending.take().is_some() {
                 self.sync_view(&t); // never shown; put the address bar back
-                return self.set_note(&t, format!("열 수 없음: {e}"));
+                return self.set_note(&t, t!("Can't open: {}", e));
             }
-            return self.set_note(&t, format!("일부만 읽음: {e}"));
+            return self.set_note(&t, t!("Partially read: {}", e));
         }
         self.commit(&t); // an empty folder sends no batches
         t.list_ms.set(ms(took));
@@ -1314,7 +1317,7 @@ impl App {
         }
         *t.rows.order.borrow_mut() = order;
         if t.search.borrow().is_none() {
-            *t.note.borrow_mut() = format!("목록 {:.1} ms · 정렬 {:.1} ms", t.list_ms.get(), ms(took));
+            *t.note.borrow_mut() = t!("List {} ms · sort {} ms", format!("{:.1}", t.list_ms.get()), format!("{:.1}", ms(took)));
         }
         self.apply_after(&t);
         t.rows.notify.reset();
@@ -1353,7 +1356,7 @@ impl App {
         let Some(t) = self.current(id, epoch) else { return };
         let auto = t.after.borrow().as_ref().is_some_and(|a| a.auto);
         if let Some(e) = err {
-            return self.set_note(&t, format!("새로 고칠 수 없음: {e}"));
+            return self.set_note(&t, t!("Can't refresh: {}", e));
         }
         if let Some(after) = t.after.borrow_mut().as_mut().filter(|a| a.select.is_empty()) {
             after.select = t.rows.selection().into_iter().map(|i| t.rows.name(i)).collect();
@@ -1371,7 +1374,7 @@ impl App {
         self.reveal_cursor(&t);
         let quiet = !t.note.borrow().is_empty();
         if auto && !quiet {
-            *t.note.borrow_mut() = "변경 감지 · 자동 새로 고침".into();
+            *t.note.borrow_mut() = t!("Change detected · auto refresh");
         }
         self.update_status(&t);
         self.sync_fit(&t);
@@ -1813,7 +1816,7 @@ impl App {
                 if let Err(e) = shell::open(&f) {
                     post(move |a| {
                         if let Some(t) = a.find(id) {
-                            a.set_note(&t, format!("열 수 없음: {e}"));
+                            a.set_note(&t, t!("Can't open: {}", e));
                         }
                     });
                 }
@@ -1876,7 +1879,7 @@ impl App {
             s.push('\\'); // "D:" means the drive root here, not D:'s current directory
         }
         let cwd = t.cwd.borrow().clone();
-        // Relative names have no meaning in the virtual "내 PC" folder; a leading "\" is
+        // Relative names have no meaning in the virtual "This PC" folder; a leading "\" is
         // resolved against the system drive, like Explorer's current-drive notation.
         let p = if is_this_pc(&cwd) {
             if Path::new(&s).is_absolute() {
@@ -1884,7 +1887,7 @@ impl App {
             } else if s.starts_with('\\') {
                 PathBuf::from(format!("C:{s}"))
             } else {
-                return self.set_note(&t, "전체 경로를 입력하세요".into());
+                return self.set_note(&t, t!("Enter the full path"));
             }
         } else {
             cwd.join(&s) // absolute input replaces cwd
@@ -1898,7 +1901,7 @@ impl App {
                 post(move |a| {
                     if let Some(t) = a.find(id) {
                         a.sync_view(&t);
-                        a.set_note(&t, r.err().map(|e| format!("열 수 없음: {e}")).unwrap_or_default());
+                        a.set_note(&t, r.err().map(|e| t!("Can't open: {}", e)).unwrap_or_default());
                     }
                 });
             } else {
@@ -1934,7 +1937,7 @@ impl App {
     fn search_in(&self, t: &Rc<Tab>, query: String) {
         let cwd = t.cwd.borrow().clone();
         if is_this_pc(&cwd) || cwd.as_os_str().is_empty() {
-            return self.set_note(t, "폴더에서만 검색할 수 있음".into());
+            return self.set_note(t, t!("Search is only available in folders"));
         }
         let options = t.search_options.get();
         let scope = Scope::Under(cwd.clone());
@@ -1944,10 +1947,10 @@ impl App {
         };
         // A typed path may narrow the search, but the result must stay inside this folder.
         let Some(root) = plan.scope.root() else {
-            return self.set_note(t, "현재 폴더와 그 하위 폴더만 검색할 수 있음".into());
+            return self.set_note(t, t!("Search is limited to the current folder and its subfolders"));
         };
         if search::below(root, &cwd).is_none() {
-            return self.set_note(t, "현재 폴더와 그 하위 폴더만 검색할 수 있음".into());
+            return self.set_note(t, t!("Search is limited to the current folder and its subfolders"));
         }
         let pattern = match Pattern::compile_mode(&plan.pattern, options.regex) {
             Ok(pattern) => pattern,
@@ -2063,8 +2066,8 @@ impl App {
                         }
                         None => {
                             let message = match e {
-                                QueryError::NotInstalled => "검색에는 인덱스 서비스가 필요함".to_string(),
-                                QueryError::Unavailable(e) => format!("검색할 수 없음: {e}"),
+                                QueryError::NotInstalled => t!("Search needs the index service"),
+                                QueryError::Unavailable(e) => t!("Can't search: {}", e),
                                 QueryError::Rejected(e) => e,
                             };
                             post(move |a| {
@@ -2114,15 +2117,15 @@ impl App {
         let (more, indexing) = (res.more, res.indexing);
         let root = scope.root().map(Path::to_path_buf);
         self.install_search(&t, query.clone(), scope, entries, tree);
-        let mut note = format!("검색 {:.0} ms", ms(took));
+        let mut note = t!("Search {} ms", format!("{:.0}", ms(took)));
         if let Some(root) = root.filter(|r| !same_path(r, &t.cwd.borrow())) {
-            note += &format!(" · {} 아래", root.display());
+            note += &t!(" · under {}", root.display());
         }
         if more {
-            note += &format!(" · 더 있음, 처음 {returned}개 표시");
+            note += &t!(" · more available, showing the first {}", returned);
         }
         if indexing > 0 {
-            note += " · 색인 중이라 결과가 아직 일부";
+            note += &t!(" · still indexing, results are partial");
             // Ask again shortly, until the index is complete.
             slint::Timer::single_shot(Duration::from_secs(2), move || {
                 app(|a| {
@@ -2164,15 +2167,15 @@ impl App {
         }
         let root = scope.root().map(Path::to_path_buf);
         self.install_search(&t, query, scope, entries, tree);
-        let mut note = format!("검색 {:.0} ms", ms(took));
+        let mut note = t!("Search {} ms", format!("{:.0}", ms(took)));
         if let Some(root) = root.filter(|r| !same_path(r, &t.cwd.borrow())) {
-            note += &format!(" · {} 아래", root.display());
+            note += &t!(" · under {}", root.display());
         }
         if more {
-            note += &format!(" · 더 있음, 처음 {SEARCH_LIMIT}개 표시");
+            note += &t!(" · more available, showing the first {}", SEARCH_LIMIT);
         }
         if let Some(e) = err {
-            note += &format!(" · 일부만 읽음: {e}");
+            note += &t!(" · Partially read: {}", e);
         }
         *t.note.borrow_mut() = note;
         if self.is_active(&t) {
@@ -2200,7 +2203,7 @@ impl App {
         t.cursor.set(None);
         t.anchor.set(None);
         *t.search.borrow_mut() = Some(Search { query, scope: Scope::Under(root), tree, options: t.search_options.get() });
-        *t.note.borrow_mut() = "색인 없이 폴더를 직접 검색 중…".into();
+        *t.note.borrow_mut() = t!("Searching the folder directly, without an index…");
         if self.is_active(&t) {
             self.ui().set_search_mode(true);
             self.ui().set_list_y(0.0);
@@ -2238,9 +2241,9 @@ impl App {
         if self.search_seq.load(SeqCst) != seq {
             return;
         }
-        let mut note = format!("폴더 검색 {:.1} s", took.as_secs_f64());
+        let mut note = t!("Folder search {} s", format!("{:.1}", took.as_secs_f64()));
         if capped {
-            note += &format!(" · 처음 {SEARCH_LIMIT}개에서 멈춤");
+            note += &t!(" · stopped at the first {}", SEARCH_LIMIT);
         }
         if let Some(e) = err {
             note += &format!(" · {e}");
@@ -2357,7 +2360,7 @@ impl App {
     fn browse_loaded(&self, id: u64, epoch: u64, node: u32, list: Vec<Entry>, err: Option<io::Error>) {
         let Some(t) = self.current(id, epoch) else { return };
         if let Some(e) = err {
-            return self.set_note(&t, format!("열 수 없음: {e}"));
+            return self.set_note(&t, t!("Can't open: {}", e));
         }
         {
             let mut entries = t.rows.entries.borrow_mut();
@@ -2410,11 +2413,11 @@ impl App {
         true
     }
 
-    /// "이 폴더에서 검색": search inside `path` and focus the search box.
+    /// "Search in this folder": search inside `path` and focus the search box.
     fn search_here(&self, path: PathBuf) {
         let t = self.tab();
         if is_this_pc(&path) {
-            return self.set_note(&t, "폴더에서만 검색할 수 있음".into());
+            return self.set_note(&t, t!("Search is only available in folders"));
         }
         if !same_path(&t.cwd.borrow(), &path) {
             self.navigate(&t, path, Hist::Push, None);
@@ -2426,7 +2429,7 @@ impl App {
     fn offer_install(&self, id: u64, query: String) {
         let Some(t) = self.find(id) else { return };
         if self.install_offered.replace(true) {
-            return self.set_note(&t, "검색에는 인덱스 서비스가 필요함 (설치되지 않음)".into());
+            return self.set_note(&t, t!("Search needs the index service (not installed)"));
         }
         let hwnd = self.hwnd();
         let here = std::env::current_exe().unwrap_or_default();
@@ -2435,28 +2438,24 @@ impl App {
         if !shell::program_files().is_ok_and(|pf| here.starts_with(pf)) {
             return self.set_note(
                 &t,
-                "인덱스 서비스가 설치되지 않음 · 관리자 권한으로 'fex-index install'을 실행하세요".into(),
+                t!("Index service is not installed · run 'fex-index install' as administrator"),
             );
         }
         let exe = here.with_file_name("fex-index.exe");
         thread::spawn(move || {
-            let ask = "모든 드라이브를 즉시 검색하려면 Fast Explorer 인덱스 서비스가 필요합니다.\n\n\
-                지금 설치할까요?\n\
-                · 관리자 권한(UAC)이 필요합니다.\n\
-                · 고정 NTFS 드라이브의 파일 이름만 색인합니다. 파일 내용은 읽지 않습니다.\n\
-                · 검색은 이 Windows 계정에서만 쓸 수 있습니다.";
-            let r = shell::confirm(hwnd, ask).then(|| shell::run_elevated(&exe, "install", hwnd));
+            let ask = t!("Fast Explorer needs its index service to search every drive instantly.\n\nInstall it now?\n· Administrator permission (UAC) is required.\n· Only file names on fixed NTFS drives are indexed; file contents are never read.\n· Search is only available to this Windows account.");
+            let r = shell::confirm(hwnd, &ask).then(|| shell::run_elevated(&exe, "install", hwnd));
             post(move |a| {
                 let Some(t) = a.find(id) else { return };
                 match r {
-                    None => a.set_note(&t, "검색에는 인덱스 서비스가 필요함".into()),
+                    None => a.set_note(&t, t!("Search needs the index service")),
                     Some(Ok(0)) => {
-                        a.set_note(&t, "인덱스 서비스 설치됨 · 색인 중…".into());
+                        a.set_note(&t, t!("Index service installed · indexing…"));
                         // Give the service a moment to open its pipe.
                         slint::Timer::single_shot(Duration::from_secs(1), move || app(|a| a.search_in(&t, query)));
                     }
-                    Some(Ok(code)) => a.set_note(&t, format!("인덱스 서비스 설치 실패 (코드 {code})")),
-                    Some(Err(e)) => a.set_note(&t, format!("인덱스 서비스 설치 취소: {e}")),
+                    Some(Ok(code)) => a.set_note(&t, t!("Index service install failed (code {})", code)),
+                    Some(Err(e)) => a.set_note(&t, t!("Index service install cancelled: {}", e)),
                 }
             });
         });
@@ -2466,19 +2465,19 @@ impl App {
     /// Installing always asks first and runs the installer (UAC); we quit so it can replace files.
     fn check_update(&self) {
         let hwnd = self.hwnd();
-        self.ui().set_update_status("확인 중…".into());
+        self.ui().set_update_status(t!("Checking…").into());
         thread::spawn(move || {
             let found = update::check();
             update::mark_checked();
             let status = match &found {
-                Ok(Some(rel)) => format!("새 버전 v{} 있음", rel.version),
-                Ok(None) => "최신 버전입니다".to_string(),
-                Err(e) => format!("확인 실패: {e}"),
+                Ok(Some(rel)) => t!("New version v{} available", rel.version),
+                Ok(None) => t!("You're up to date"),
+                Err(e) => t!("Check failed: {}", e),
             };
             post(move |a| a.ui().set_update_status(status.into()));
             let Ok(Some(rel)) = found else { return };
-            let ask = format!(
-                "새 버전 v{}을(를) 사용할 수 있습니다 (현재 v{}).\n\n지금 다운로드하여 설치할까요? 설치 중 Fast Explorer가 닫힙니다.",
+            let ask = t!(
+                "Version v{} is available (current v{}).\n\nDownload and install it now? Fast Explorer will close during installation.",
                 rel.version,
                 update::CURRENT
             );
@@ -2488,15 +2487,15 @@ impl App {
             post(|a| {
                 let tabs: Vec<PathBuf> = a.tabs.borrow().iter().map(|t| t.cwd.borrow().clone()).collect();
                 update::save_session(a.active.get(), &tabs);
-                a.ui().set_update_status("다운로드 중…".into());
+                a.ui().set_update_status(t!("Downloading…").into());
             });
             match update::download(&rel).map_err(io::Error::other).and_then(|f| shell::open(&f)) {
                 Ok(()) => post(|_| {
                     let _ = slint::quit_event_loop();
                 }),
                 Err(e) => {
-                    post(|a| a.ui().set_update_status("업데이트 실패".into()));
-                    shell::alert(hwnd, &format!("업데이트 실패: {e}"));
+                    post(|a| a.ui().set_update_status(t!("Update failed").into()));
+                    shell::alert(hwnd, &t!("Update failed: {}", e));
                 }
             }
         });
@@ -2518,7 +2517,7 @@ impl App {
             return Ok(*seq);
         }
         if !background && paths.iter().any(|p| p.parent() != paths[0].parent()) {
-            return Err("셸 메뉴는 한 폴더 안의 항목에만 쓸 수 있음".into()); // e.g. search hits
+            return Err(t!("The shell menu only works on items in a single folder").into()); // e.g. search hits
         }
         let seq = self.next_seq();
         let req = match background {
@@ -2540,7 +2539,7 @@ impl App {
         let _ = match sel.len() {
             0 => self.prefetch(true, vec![cwd]),
             1..=500 => self.prefetch(false, sel.iter().map(|&i| t.path_of(i)).collect()),
-            _ => return, // huge selections: built on demand ("더 많은 옵션")
+            _ => return, // huge selections: built on demand ("More options")
         };
     }
 
@@ -2609,7 +2608,7 @@ impl App {
     }
 
     /// Our own items show at once; the shell's join them if the host has them ready
-    /// (prefetched), else they are one click away under "더 많은 옵션".
+    /// (prefetched), else they are one click away under "More options".
     fn context_menu(&self, background: bool, at: (i32, i32)) {
         let t = self.tab();
         let cwd = t.cwd.borrow().clone();
@@ -2619,7 +2618,7 @@ impl App {
         }
         if at_this_pc(&t) {
             if background {
-                let top = [own(CMD_REFRESH, "새로 고침\tF5")];
+                let top = [own(CMD_REFRESH, hint(t!("Refresh"), "F5"))];
                 let id = popup::show(self.hwnd(), at, &top, &[], &[]);
                 self.end_menu_pointer();
                 if id == CMD_REFRESH {
@@ -2633,22 +2632,22 @@ impl App {
 
         let mut top = if background {
             vec![
-                with_icon(Own { disabled: !shell::clipboard_has_files(), ..own(CMD_PASTE, "붙여넣기\tCtrl+V") }, popup::Icon::Glyph(popup::glyph::PASTE)),
-                with_icon(own(CMD_NEW_FOLDER, "새 폴더\tCtrl+Shift+N"), popup::Icon::Stock(SIID_FOLDER)),
-                with_icon(own(CMD_NEW_FILE, "새 텍스트 문서"), popup::Icon::Stock(SIID_DOCNOASSOC)),
-                with_icon(own(CMD_REFRESH, "새로 고침\tF5"), popup::Icon::Glyph(popup::glyph::REFRESH)),
+                with_icon(Own { disabled: !shell::clipboard_has_files(), ..own(CMD_PASTE, hint(t!("Paste"), "Ctrl+V")) }, popup::Icon::Glyph(popup::glyph::PASTE)),
+                with_icon(own(CMD_NEW_FOLDER, hint(t!("New folder"), "Ctrl+Shift+N")), popup::Icon::Stock(SIID_FOLDER)),
+                with_icon(own(CMD_NEW_FILE, t!("New text document")), popup::Icon::Stock(SIID_DOCNOASSOC)),
+                with_icon(own(CMD_REFRESH, hint(t!("Refresh"), "F5")), popup::Icon::Glyph(popup::glyph::REFRESH)),
                 SEP,
-                with_icon(own(CMD_SEARCH_HERE, "이 폴더에서 검색"), popup::Icon::Glyph(popup::glyph::SEARCH)),
-                with_icon(own(CMD_ADD_FAVORITE, "즐겨찾기에 추가"), popup::Icon::Glyph(popup::glyph::STAR)),
+                with_icon(own(CMD_SEARCH_HERE, t!("Search in this folder")), popup::Icon::Glyph(popup::glyph::SEARCH)),
+                with_icon(own(CMD_ADD_FAVORITE, t!("Add to favorites")), popup::Icon::Glyph(popup::glyph::STAR)),
             ]
         } else if at_this_pc(&t) {
             vec![
-                Own { default: true, ..own(CMD_OPEN, "열기\tEnter") },
-                with_icon(own(CMD_OPEN_TAB, "새 탭에서 열기"), popup::Icon::Glyph(popup::glyph::NEW_TAB)),
-                with_icon(own(CMD_SEARCH_HERE, "이 폴더에서 검색"), popup::Icon::Glyph(popup::glyph::SEARCH)),
-                with_icon(own(CMD_ADD_FAVORITE, "즐겨찾기에 추가"), popup::Icon::Glyph(popup::glyph::STAR)),
+                Own { default: true, ..own(CMD_OPEN, hint(t!("Open"), "Enter")) },
+                with_icon(own(CMD_OPEN_TAB, t!("Open in new tab")), popup::Icon::Glyph(popup::glyph::NEW_TAB)),
+                with_icon(own(CMD_SEARCH_HERE, t!("Search in this folder")), popup::Icon::Glyph(popup::glyph::SEARCH)),
+                with_icon(own(CMD_ADD_FAVORITE, t!("Add to favorites")), popup::Icon::Glyph(popup::glyph::STAR)),
                 SEP,
-                with_icon(own(CMD_COPY_PATH, "경로 복사\tCtrl+Shift+C"), popup::Icon::Glyph(popup::glyph::LINK)),
+                with_icon(own(CMD_COPY_PATH, hint(t!("Copy path"), "Ctrl+Shift+C")), popup::Icon::Glyph(popup::glyph::LINK)),
             ]
         } else {
             let sel = t.rows.selection();
@@ -2659,28 +2658,28 @@ impl App {
                 .as_ref()
                 .is_some_and(|s| sel.iter().any(|&i| !s.tree.is_hit(i)));
             let item_icon = popup::Icon::Path(paths[0].clone());
-            let mut v = vec![with_icon(Own { default: true, ..own(CMD_OPEN, "열기\tEnter") }, item_icon)];
+            let mut v = vec![with_icon(Own { default: true, ..own(CMD_OPEN, hint(t!("Open"), "Enter")) }, item_icon)];
             if let [i] = sel[..]
                 && t.rows.is_dir(i)
             {
-                v.push(with_icon(own(CMD_OPEN_TAB, "새 탭에서 열기"), popup::Icon::Glyph(popup::glyph::NEW_TAB)));
-                v.push(with_icon(own(CMD_SEARCH_HERE, "이 폴더에서 검색"), popup::Icon::Glyph(popup::glyph::SEARCH)));
-                v.push(with_icon(own(CMD_ADD_FAVORITE, "즐겨찾기에 추가"), popup::Icon::Glyph(popup::glyph::STAR)));
+                v.push(with_icon(own(CMD_OPEN_TAB, t!("Open in new tab")), popup::Icon::Glyph(popup::glyph::NEW_TAB)));
+                v.push(with_icon(own(CMD_SEARCH_HERE, t!("Search in this folder")), popup::Icon::Glyph(popup::glyph::SEARCH)));
+                v.push(with_icon(own(CMD_ADD_FAVORITE, t!("Add to favorites")), popup::Icon::Glyph(popup::glyph::STAR)));
             }
             v.extend([
                 SEP,
-                with_icon(own(CMD_CUT, "잘라내기\tCtrl+X"), popup::Icon::Glyph(popup::glyph::CUT)),
-                with_icon(own(CMD_COPY, "복사\tCtrl+C"), popup::Icon::Glyph(popup::glyph::COPY)),
-                with_icon(own(CMD_COPY_PATH, "경로 복사\tCtrl+Shift+C"), popup::Icon::Glyph(popup::glyph::LINK)),
+                with_icon(own(CMD_CUT, hint(t!("Cut"), "Ctrl+X")), popup::Icon::Glyph(popup::glyph::CUT)),
+                with_icon(own(CMD_COPY, hint(t!("Copy"), "Ctrl+C")), popup::Icon::Glyph(popup::glyph::COPY)),
+                with_icon(own(CMD_COPY_PATH, hint(t!("Copy path"), "Ctrl+Shift+C")), popup::Icon::Glyph(popup::glyph::LINK)),
             ]);
-            v.push(with_icon(own(CMD_LOCKS, "사용 중인 프로세스 찾기"), popup::Icon::Glyph(popup::glyph::LOCK)));
+            v.push(with_icon(own(CMD_LOCKS, t!("Find processes using it")), popup::Icon::Glyph(popup::glyph::LOCK)));
             if !structural {
                 v.extend([
                     SEP,
-                    with_icon(own(CMD_RENAME, "이름 바꾸기\tF2"), popup::Icon::Stock(SIID_RENAME)),
-                    with_icon(own(CMD_DELETE, "삭제\tDel"), popup::Icon::Stock(SIID_DELETE)),
+                    with_icon(own(CMD_RENAME, hint(t!("Rename"), "F2")), popup::Icon::Stock(SIID_RENAME)),
+                    with_icon(own(CMD_DELETE, hint(t!("Delete"), "Del")), popup::Icon::Stock(SIID_DELETE)),
                     SEP,
-                    with_icon(own(CMD_RENAME_MANY, "여러 이름 바꾸기\tShift+F2"), popup::Icon::Glyph(popup::glyph::RENAME_MANY)),
+                    with_icon(own(CMD_RENAME_MANY, hint(t!("Rename multiple"), "Shift+F2")), popup::Icon::Glyph(popup::glyph::RENAME_MANY)),
                 ]);
             }
             v
@@ -2691,14 +2690,14 @@ impl App {
         };
         match (&seq, &shell) {
             (Ok(_), Some(Ok(_))) => {}
-            (Ok(_), None) => top.extend([SEP, with_icon(own(CMD_MORE, "더 많은 옵션…"), popup::Icon::Glyph(popup::glyph::MORE))]),
+            (Ok(_), None) => top.extend([SEP, with_icon(own(CMD_MORE, t!("More options…")), popup::Icon::Glyph(popup::glyph::MORE))]),
             (Ok(_), Some(Err(e))) => {
-                self.set_note(&t, format!("셸 메뉴 실패: {e}"));
-                top.extend([SEP, with_icon(own(CMD_RETRY, "더 많은 옵션 (다시 시도)…"), popup::Icon::Glyph(popup::glyph::MORE))]);
+                self.set_note(&t, t!("Shell menu failed: {}", e));
+                top.extend([SEP, with_icon(own(CMD_RETRY, t!("More options (retry)…")), popup::Icon::Glyph(popup::glyph::MORE))]);
             }
             (Err(e), _) => self.set_note(&t, e.clone()),
         }
-        let bottom = [with_icon(own(CMD_PROPERTIES, "속성\tAlt+Enter"), popup::Icon::Stock(SIID_SETTINGS))];
+        let bottom = [with_icon(own(CMD_PROPERTIES, hint(t!("Properties"), "Alt+Enter")), popup::Icon::Stock(SIID_SETTINGS))];
 
         let id = popup::show(self.hwnd(), at, &top, items, &bottom);
         self.end_menu_pointer();
@@ -2739,6 +2738,63 @@ impl App {
         }
     }
 
+    /// Sidebar drive right-click: open, eject (removable only), format, properties.
+    fn drive_menu(&self, path: &str, at: (i32, i32)) {
+        let root = PathBuf::from(path);
+        let removable = self.drives.borrow().iter().any(|d| same_path(&d.path, &root) && d.kind == "Removable Disk");
+        let fixed_or_removable = self.drives.borrow().iter().any(|d| same_path(&d.path, &root) && matches!(d.kind, "Removable Disk" | "Local Disk"));
+        let mut top = vec![
+            Own { default: true, ..own(CMD_OPEN, t!("Open")) },
+            with_icon(own(CMD_OPEN_TAB, t!("Open in new tab")), popup::Icon::Glyph(popup::glyph::NEW_TAB)),
+            SEP,
+        ];
+        if removable {
+            top.push(own(CMD_EJECT, t!("Eject")));
+        }
+        if fixed_or_removable {
+            top.push(own(CMD_FORMAT, t!("Format…")));
+        }
+        let bottom = [with_icon(own(CMD_PROPERTIES, t!("Properties")), popup::Icon::Stock(SIID_SETTINGS))];
+        let id = popup::show(self.hwnd(), at, &top, &[], &bottom);
+        self.end_menu_pointer();
+        match id {
+            CMD_OPEN => self.open_place(path),
+            CMD_OPEN_TAB => self.open_place_in_tab(path),
+            CMD_EJECT => self.eject_drive(root),
+            CMD_FORMAT => {
+                let hwnd = self.hwnd();
+                thread::spawn(move || shell::format_dialog(hwnd, &root));
+            }
+            CMD_PROPERTIES => self.properties_of(vec![root]),
+            _ => {}
+        }
+    }
+
+    /// Leaves the drive in every tab (watchers hold it open), ejects off the UI thread,
+    /// then refreshes the sidebar and "This PC" so the result is visible.
+    fn eject_drive(&self, root: PathBuf) {
+        let tabs: Vec<Rc<Tab>> = self.tabs.borrow().iter().cloned().collect();
+        for t in tabs {
+            let on = t.cwd.borrow().to_string_lossy().get(..2).is_some_and(|p| root.to_string_lossy().get(..2).is_some_and(|r| p.eq_ignore_ascii_case(r)));
+            if on {
+                self.navigate(&t, PathBuf::from(THIS_PC), Hist::Push, None);
+            }
+        }
+        let t = self.tab();
+        self.set_note(&t, t!("Ejecting…"));
+        thread::spawn(move || {
+            let r = shell::eject(&root);
+            post(move |a| {
+                let note = match r {
+                    Ok(()) => t!("{} ejected", root.display()),
+                    Err(e) => e,
+                };
+                a.set_note(&a.tab(), note);
+                a.refresh_drives();
+            });
+        });
+    }
+
     /// Waits (off the UI thread) for the shell menu, then shows it on its own.
     fn more_options(&self, background: bool, paths: Vec<PathBuf>, retry: bool, at: (i32, i32)) {
         if retry {
@@ -2750,7 +2806,7 @@ impl App {
             Err(e) => return self.set_note(&self.tab(), e),
         };
         self.menu_busy.set(true);
-        self.set_note(&self.tab(), "셸 메뉴 불러오는 중…".into());
+        self.set_note(&self.tab(), t!("Loading shell menu…"));
         let host = self.host.clone();
         thread::spawn(move || {
             let r = host.wait(seq, HANG_LIMIT);
@@ -2770,12 +2826,12 @@ impl App {
                     self.invoke_shell(Request::Invoke { seq, id });
                 }
             }
-            Some(Err(e)) => self.set_note(&t, format!("셸 메뉴 실패: {e}")),
+            Some(Err(e)) => self.set_note(&t, t!("Shell menu failed: {}", e)),
             None => {
                 // A shell extension is stuck: replace the host, Fast Explorer carries on.
                 self.host.restart();
                 *self.prefetched.borrow_mut() = None;
-                self.set_note(&t, "셸 메뉴가 응답하지 않아 다시 시작함".into());
+                self.set_note(&t, t!("The shell menu stopped responding and was restarted"));
             }
         }
     }
@@ -2818,8 +2874,8 @@ impl App {
         }
         let text = paths.iter().map(|p| format!("\"{}\"", p.display())).collect::<Vec<_>>().join("\r\n");
         let note = match shell::clipboard_set_text(&text, self.hwnd()) {
-            Ok(()) => format!("경로 {}개 복사함", paths.len()),
-            Err(e) => format!("클립보드 실패: {e}"),
+            Ok(()) => t!("Copied {} paths", paths.len()),
+            Err(e) => t!("Clipboard failed: {}", e),
         };
         self.set_note(&t, note);
     }
@@ -2837,7 +2893,7 @@ impl App {
     fn copy(&self, cut: bool) {
         let t = self.tab();
         if at_this_pc(&t) {
-            return self.set_note(&t, "내 PC에서는 복사할 수 없음".into());
+            return self.set_note(&t, t!("Can't copy in This PC"));
         }
         let paths = self.selected_paths(&t);
         if paths.is_empty() {
@@ -2851,9 +2907,9 @@ impl App {
                     clear_cut();
                 }
                 self.refresh_cut();
-                format!("{}개 {}", paths.len(), if cut { "잘라냄" } else { "복사함" })
+                if cut { t!("Cut {} items", paths.len()) } else { t!("Copied {} items", paths.len()) }
             }
-            Err(e) => format!("클립보드 실패: {e}"),
+            Err(e) => t!("Clipboard failed: {}", e),
         };
         self.set_note(&t, note);
     }
@@ -2868,12 +2924,12 @@ impl App {
     fn paste(&self) {
         let t = self.tab();
         if is_this_pc(&t.cwd.borrow()) {
-            return self.set_note(&t, "내 PC에는 붙여넣을 수 없음".into());
+            return self.set_note(&t, t!("Can't paste into This PC"));
         }
         // ponytail: reads the clipboard on the UI thread; an app that renders its clipboard
         // data lazily could stall this. Move to a worker if that shows up.
         let Some((src, cut)) = shell::clipboard_get(self.hwnd()) else {
-            return self.set_note(&t, "붙여넣을 파일이 없음".into());
+            return self.set_note(&t, t!("No files to paste"));
         };
         let names = src.iter().filter_map(|p| p.file_name()).map(|n| n.to_string_lossy().into_owned()).collect();
         let dst = t.cwd.borrow().clone();
@@ -2915,10 +2971,10 @@ impl App {
     fn delete(&self, permanent: bool) {
         let t = self.tab();
         if at_this_pc(&t) {
-            return self.set_note(&t, "내 PC에서는 삭제할 수 없음".into());
+            return self.set_note(&t, t!("Can't delete in This PC"));
         }
         if self.includes_tree_container(&t) {
-            return self.set_note(&t, "폴더 구조 행은 삭제할 수 없음".into());
+            return self.set_note(&t, t!("Folder tree rows can't be deleted"));
         }
         let paths = self.selected_paths(&t);
         if paths.is_empty() {
@@ -2935,10 +2991,10 @@ impl App {
     fn start_rename(&self) {
         let t = self.tab();
         if at_this_pc(&t) {
-            return self.set_note(&t, "내 PC에서는 이름을 바꿀 수 없음".into());
+            return self.set_note(&t, t!("Can't rename in This PC"));
         }
         if self.includes_tree_container(&t) {
-            return self.set_note(&t, "폴더 구조 행은 이름을 바꿀 수 없음".into());
+            return self.set_note(&t, t!("Folder tree rows can't be renamed"));
         }
         let Some(c) = t.cursor.get().or_else(|| t.rows.selection().first().copied()) else { return };
         t.rows.select_only(Some(c));
@@ -2981,10 +3037,10 @@ impl App {
     fn new_item(&self, create: fn(&std::path::Path) -> io::Result<String>) {
         let t = self.tab();
         if at_this_pc(&t) {
-            return self.set_note(&t, "내 PC에서는 새로 만들 수 없음".into());
+            return self.set_note(&t, t!("Can't create new items in This PC"));
         }
         if t.search.borrow().is_some() {
-            return self.set_note(&t, "검색 결과에서는 새로 만들 수 없음".into());
+            return self.set_note(&t, t!("Can't create new items in search results"));
         }
         self.ui().invoke_focus_list();
         let (id, dir) = (t.id, t.cwd.borrow().clone());
@@ -2998,13 +3054,13 @@ impl App {
                         a.push_undo(Undo::Create(path_dir.join(&name)));
                         a.reload(&t, After { select: vec![name], rename: true, ..Default::default() });
                     }
-                    Err(e) => a.show_error(&t, "새로 만들지 못했습니다.", &e),
+                    Err(e) => a.show_error(&t, &t!("Couldn't create it."), &e),
                 }
             });
         });
     }
 
-    /// "숨긴 항목" / "파일 확장명" toggled: remember the choice, re-filter and redraw every tab.
+    /// "Hidden items" / "File extensions" toggled: remember the choice, re-filter and redraw every tab.
     fn view_changed(&self) {
         let ui = self.ui();
         SHOW_HIDDEN.store(ui.get_show_hidden(), Relaxed);
@@ -3113,7 +3169,7 @@ impl App {
             };
             let (note, err) = match r {
                 Ok(true) => (String::new(), None),
-                Ok(false) => ("취소됨".into(), None),
+                Ok(false) => (t!("Cancelled").into(), None),
                 Err(e) => (String::new(), Some(e)),
             };
             post(move |a| {
@@ -3123,7 +3179,7 @@ impl App {
                     }
                     a.set_note(&t, note);
                     if let Some(e) = err {
-                        a.show_error(&t, "파일을 옮기거나 복사하지 못했습니다.", &e);
+                        a.show_error(&t, &t!("Couldn't move or copy the files."), &e);
                     }
                     a.reload(&t, After::default());
                 }
@@ -3156,8 +3212,8 @@ impl App {
                         }
                         *t.note.borrow_mut() = String::new();
                     }
-                    Ok((false, _)) => *t.note.borrow_mut() = "취소됨".into(),
-                    Err(e) => a.show_error(&t, "작업을 완료하지 못했습니다.", &e),
+                    Ok((false, _)) => *t.note.borrow_mut() = t!("Cancelled"),
+                    Err(e) => a.show_error(&t, &t!("Couldn't complete the operation."), &e),
                 }
                 a.reload(&t, after);
             });
@@ -3175,7 +3231,7 @@ impl App {
     /// Ctrl+Z: runs the inverse of the most recent tracked operation.
     fn undo(&self) {
         let Some(u) = self.undo.borrow_mut().pop() else {
-            return self.set_note(&self.tab(), "되돌릴 작업 없음".into());
+            return self.set_note(&self.tab(), t!("Nothing to undo"));
         };
         let t = self.tab();
         let (id, hwnd) = (t.id, self.hwnd());
@@ -3221,7 +3277,7 @@ impl App {
                     Undo::Delete { items } => {
                         let n = shell::restore_deleted(&items, Some(hwnd))?;
                         if n == 0 {
-                            Err(io::Error::new(io::ErrorKind::NotFound, "휴지통에서 찾을 수 없음"))
+                            Err(io::Error::new(io::ErrorKind::NotFound, t!("Not found in the Recycle Bin")))
                         } else {
                             Ok(true)
                         }
@@ -3232,11 +3288,11 @@ impl App {
                 let Some(t) = a.find(id) else { return };
                 match r {
                     Ok(true) => {
-                        a.set_note(&t, "되돌림".into());
+                        a.set_note(&t, t!("Undone"));
                         a.reload(&t, After::default());
                     }
-                    Ok(false) => a.set_note(&t, "되돌리기 취소됨".into()),
-                    Err(e) => a.show_error(&t, "되돌리지 못했습니다.", &e),
+                    Ok(false) => a.set_note(&t, t!("Undo cancelled")),
+                    Err(e) => a.show_error(&t, &t!("Couldn't undo."), &e),
                 }
             });
         });
@@ -3250,7 +3306,7 @@ fn dir_entries(dir: &Path) -> HashSet<PathBuf> {
         .unwrap_or_default()
 }
 
-/// Pairs original paths with the items an operation created. Conflict renames ("name - 복사본")
+/// Pairs original paths with the items an operation created. Conflict renames ("name - Copy")
 /// cannot be matched by name, so equal leftovers are paired in order.
 fn pair_moves(src: &[PathBuf], created: &[PathBuf]) -> Vec<(PathBuf, PathBuf)> {
     let mut used = vec![false; created.len()];
@@ -3308,20 +3364,23 @@ fn display_name(e: &Entry) -> String {
     name
 }
 
+fn hint(label: String, key: &str) -> String {
+    format!("{label}\t{key}")
+}
+
 fn kind_of(e: &Entry) -> String {
     match (e.is_dir(), e.extension()) {
-        (true, _) => "파일 폴더".to_string(),
-        (false, x) if x.is_empty() => "파일".to_string(),
-        (false, x) => format!("{} 파일", x.to_uppercase()),
+        (true, _) => t!("File folder"),
+        (false, x) if x.is_empty() => t!("File"),
+        (false, x) => t!("{} file", x.to_uppercase()),
     }
 }
 
-/// "내 PC": keep user folders above drives while preserving the chosen column order within
+/// "This PC": keep user folders above drives while preserving the chosen column order within
 /// each group. `kinds` is aligned with the entries; user folders are listed first.
 fn group_this_pc_order(order: &mut [u32], kinds: &[String]) {
-    order.sort_by_key(|&i| {
-        u8::from(!matches!(kinds.get(i as usize).map(String::as_str), Some("파일 폴더")))
-    });
+    let folder = t!("File folder");
+    order.sort_by_key(|&i| u8::from(kinds.get(i as usize) != Some(&folder)));
 }
 
 /// Explorer-like capacity for drives: "236 GB", "1.81 TB", "512 MB".
@@ -3349,7 +3408,7 @@ fn build_this_pc_rows(drives: &[shell::Drive]) -> Vec<ThisPcRow> {
         .map(|(title, path)| ThisPcRow {
             title,
             path,
-            kind: "파일 폴더".to_string(),
+            kind: t!("File folder"),
             date: String::new(),
             size: String::new(),
             usage: -1.0,
@@ -3361,14 +3420,14 @@ fn build_this_pc_rows(drives: &[shell::Drive]) -> Vec<ThisPcRow> {
         let (date, size, usage, free, total) = match shell::drive_space(&drive.path) {
             Some((free, total)) => {
                 let usage = (total.saturating_sub(free)) as f32 / total as f32;
-                (format!("{} 남음", format_capacity(free)), format_capacity(total), usage, free, total)
+                (t!("{} free", format_capacity(free)), format_capacity(total), usage, free, total)
             }
-            None => ("사용할 수 없음".to_string(), String::new(), -1.0, 0, 0),
+            None => (t!("Unavailable"), String::new(), -1.0, 0, 0),
         };
         rows.push(ThisPcRow {
             title: drive.title.clone(),
             path: drive.path.clone(),
-            kind: drive.kind.to_string(),
+            kind: fex_core::i18n::tr(drive.kind),
             date,
             size,
             usage,
@@ -3379,7 +3438,7 @@ fn build_this_pc_rows(drives: &[shell::Drive]) -> Vec<ThisPcRow> {
     rows
 }
 
-/// Path completion for the address bar: "내 PC", drive roots, then matching folders/files
+/// Path completion for the address bar: "This PC", drive roots, then matching folders/files
 /// under the typed parent. Runs on a worker.
 fn suggest_paths(input: &str, cwd: &Path) -> Vec<Suggest> {
     const LIMIT: usize = 8;
@@ -3391,8 +3450,8 @@ fn suggest_paths(input: &str, cwd: &Path) -> Vec<Suggest> {
     let text = expanded.as_str();
     let lower = text.to_lowercase();
     let mut out: Vec<Suggest> = Vec::new();
-    if "내 pc".starts_with(&lower) || "this pc".starts_with(&lower) || THIS_PC.to_lowercase().starts_with(&lower) {
-        out.push(Suggest { name: "내 PC".into(), detail: "드라이브와 폴더".into(), path: THIS_PC.into() });
+    if "내 pc".starts_with(&lower) || "this pc".starts_with(&lower) || t!("This PC").to_lowercase().starts_with(&lower) || THIS_PC.to_lowercase().starts_with(&lower) {
+        out.push(Suggest { name: t!("This PC").into(), detail: t!("Drives and folders").into(), path: THIS_PC.into() });
     }
     // "C" / "C:" autocompletes to the drive root.
     if text.len() <= 2 && !text.contains('\\') && !text.contains('/') {
@@ -3420,7 +3479,7 @@ fn suggest_paths(input: &str, cwd: &Path) -> Vec<Suggest> {
                 detail: if is_dir {
                     parent.display().to_string()
                 } else {
-                    format!("{} · 파일", parent.display())
+                    t!("{} · File", parent.display())
                 }
                 .into(),
                 path: path.into(),
@@ -3490,7 +3549,7 @@ fn expand_env(text: &str) -> String {
     out
 }
 
-/// Sorted display order, without hidden items unless "숨긴 항목" is on.
+/// Sorted display order, without hidden items unless "Hidden items" is on.
 fn display_order(entries: &[Entry], key: SortKey, desc: bool) -> Vec<u32> {
     let mut order = sort_order(entries, key, desc);
     order.retain(|&i| shown(&entries[i as usize]));
@@ -3515,11 +3574,11 @@ fn fit_samples(t: &Tab) -> FitSamples {
     let sizes = t.rows.sizes.borrow();
     let searching = t.search.borrow().is_some();
     let this_pc = is_this_pc(&t.cwd.borrow()) && !searching;
-    let mut name = "이름".to_string();
-    let mut location = "위치".to_string();
-    let mut date = if this_pc { "여유 공간".to_string() } else { "수정한 날짜".to_string() };
-    let mut kind = "유형".to_string();
-    let mut size = if this_pc { "전체 용량".to_string() } else { "크기".to_string() };
+    let mut name = t!("Name");
+    let mut location = t!("Location");
+    let mut date = if this_pc { t!("Free space") } else { t!("Date modified") };
+    let mut kind = t!("Type");
+    let mut size = if this_pc { t!("Total capacity") } else { t!("Size") };
     let (mut name_w, mut location_w) = (text_units(&name), text_units(&location));
     let (mut kind_w, mut size_w, mut date_w) = (text_units(&kind), text_units(&size), text_units(&date));
     let mut has_date = false;
@@ -3662,7 +3721,7 @@ fn walk_search_worker(id: u64, seq: u64, latest: Arc<AtomicU64>, root: PathBuf, 
     use std::sync::atomic::{AtomicBool, AtomicUsize};
     let start = Instant::now();
     if !root.is_dir() {
-        let note = format!("폴더를 찾을 수 없음: {}", root.display());
+        let note = t!("Folder not found: {}", root.display());
         post(move |a| {
             if let Some(t) = a.find(id) {
                 a.set_note(&t, note);
@@ -3722,7 +3781,7 @@ fn same_path(a: &Path, b: &Path) -> bool {
 /// Folder buttons for the address bar, from the drive down to `path`.
 fn crumbs_for(path: &Path) -> Vec<Crumb> {
     if is_this_pc(path) {
-        return vec![Crumb { title: "내 PC".into(), path: THIS_PC.into() }];
+        return vec![Crumb { title: t!("This PC").into(), path: THIS_PC.into() }];
     }
     let mut ancestors: Vec<&Path> = path.ancestors().collect();
     ancestors.reverse();
@@ -3989,13 +4048,16 @@ fn log_panics() {
 fn main() -> Result<(), slint::PlatformError> {
     log_panics();
     let ui = AppWindow::new()?;
+    if fex_core::i18n::korean() {
+        let _ = slint::select_bundled_translation("ko");
+    }
     let tab_model = Rc::new(VecModel::default());
     ui.set_tabs(ModelRc::from(tab_model.clone()));
 
     let exe = std::env::current_exe().unwrap_or_default().with_file_name("fex-shell-host.exe");
     let host = Arc::new(MenuHost::new(exe, |_, r| {
         if let Err(e) = r {
-            post(move |a| a.set_note(&a.tab(), format!("실행 실패: {e}")));
+            post(move |a| a.set_note(&a.tab(), t!("Launch failed: {}", e)));
         }
     }));
     host.warm_up(); // loading shell extensions takes seconds the first time; do it now
@@ -4101,6 +4163,10 @@ fn main() -> Result<(), slint::PlatformError> {
     ui.on_place_open_tab(|p| app(|a| a.open_place_in_tab(&p)));
     ui.on_place_add(|| app(|a| a.add_favorite()));
     ui.on_place_remove(|p| app(|a| a.remove_favorite(&p)));
+    ui.on_drive_menu(|p| {
+        let at = cursor_pos();
+        slint::Timer::single_shot(Duration::from_millis(30), move || app(|a| a.drive_menu(&p, at)));
+    });
     ui.on_history(|d| app(|a| if d < 0 { a.back() } else { a.forward() }));
     ui.on_rubber_start(|ctrl| app(|a| a.rubber_start(ctrl)));
     ui.on_rubber_move(|y1, y2| app(|a| a.rubber_move(y1, y2)));
@@ -4145,6 +4211,8 @@ fn main() -> Result<(), slint::PlatformError> {
 
 #[cfg(test)]
 mod tests {
+    use fex_core::t;
+
     #[test]
     fn crumbs_from_the_drive_root() {
         let crumbs = super::crumbs_for(std::path::Path::new(r"C:\Users\hp\source"));
@@ -4164,7 +4232,7 @@ mod tests {
 
         let crumbs = super::crumbs_for(std::path::Path::new(super::THIS_PC));
         assert_eq!(crumbs.len(), 1);
-        assert_eq!(crumbs[0].title, "내 PC");
+        assert_eq!(crumbs[0].title.as_str(), t!("This PC"));
         assert_eq!(crumbs[0].path, super::THIS_PC);
     }
 
@@ -4179,10 +4247,8 @@ mod tests {
 
     #[test]
     fn groups_folders_before_drives() {
-        let kinds: Vec<String> = ["파일 폴더", "로컬 디스크", "파일 폴더", "이동식 디스크"]
-            .iter()
-            .map(|k| k.to_string())
-            .collect();
+        let kinds: Vec<String> = [t!("File folder"), t!("Local Disk"), t!("File folder"), t!("Removable Disk")]
+            .to_vec();
         let mut order = vec![1, 3, 0, 2];
         super::group_this_pc_order(&mut order, &kinds);
         assert_eq!(order, [0, 2, 1, 3]); // the order inside each group is preserved

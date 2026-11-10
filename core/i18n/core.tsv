@@ -1,0 +1,40 @@
+Invalid reply	잘못된 응답
+Index service is outdated · reinstall it	인덱스 서비스가 오래됨 · 다시 설치하세요
+The search pipe is not owned by the index service	검색 파이프의 주인이 인덱스 서비스가 아님
+The search pipe stays busy	검색 파이프가 계속 사용 중
+The index service is not running	인덱스 서비스가 실행 중이 아님
+This process cannot be terminated	이 프로세스는 종료할 수 없음
+The process has already exited or changed	프로세스가 이미 종료되었거나 바뀜
+Cannot start the shell menu process: {}	셸 메뉴 프로세스를 시작할 수 없음: {}
+Cannot send to the shell menu process	셸 메뉴 프로세스에 보낼 수 없음
+The shell menu process has exited	셸 메뉴 프로세스가 종료됨
+Regex error: {}	정규식 오류: {}
+Name is empty	이름이 비어 있음
+A name cannot contain \ / : * ? " < > |	이름에 \ / : * ? " < > | 를 쓸 수 없음
+A name cannot end with a dot or space	이름 끝에 점이나 공백을 쓸 수 없음
+Two or more items would get the same name	같은 이름이 둘 이상 생김
+An item with that name already exists	같은 이름이 이미 있음
+Search query is empty	검색어가 비어 있음
+Folder not found: {}	폴더를 찾을 수 없음: {}
+Desktop	바탕 화면
+Downloads	다운로드
+Documents	문서
+Pictures	사진
+Music	음악
+Videos	비디오
+Removable Disk	이동식 디스크
+Local Disk	로컬 디스크
+Network Drive	네트워크 드라이브
+CD Drive	CD 드라이브
+RAM Disk	RAM 디스크
+Drive	드라이브
+New folder	새 폴더
+New Text Document	새 텍스트 문서
+Invalid drive	잘못된 드라이브
+Cannot open the drive: {}	드라이브를 열 수 없음: {}
+Files are in use, so the drive cannot be ejected	사용 중인 파일이 있어 꺼낼 수 없음
+Eject failed: {}	꺼내기 실패: {}
+Cannot create the name {}	{} 이름을 만들 수 없음
+The menu has changed. Please open it again.	메뉴가 바뀌었습니다. 다시 열어 주세요.
+Unknown request	알 수 없는 요청
+Instant file name search for Fast Explorer (NTFS MFT / USN journal index)	Fast Explorer의 즉시 파일 이름 검색 (NTFS MFT / USN 저널 색인)

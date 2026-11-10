@@ -73,7 +73,7 @@ pub fn compile(rule: &Rule) -> Result<Option<Regex>, String> {
         .case_insensitive(!rule.match_case)
         .build()
         .map(Some)
-        .map_err(|e| format!("정규식 오류: {}", e.to_string().lines().last().unwrap_or("")))
+        .map_err(|e| crate::t!("Regex error: {}", e.to_string().lines().last().unwrap_or("")))
 }
 
 /// Expands `{n}` and `{n:W}` in the replacement text.
@@ -177,11 +177,11 @@ pub fn plan(rule: &Rule, items: &[(PathBuf, bool)], exists: impl Fn(&Path) -> bo
             let status = if new == old {
                 Status::Unchanged
             } else if new.trim().is_empty() {
-                Status::Error("이름이 비어 있음".into())
+                Status::Error(crate::t!("Name is empty"))
             } else if new.contains(INVALID) {
-                Status::Error("이름에 \\ / : * ? \" < > | 를 쓸 수 없음".into())
+                Status::Error(crate::t!("A name cannot contain \\ / : * ? \" < > |"))
             } else if new.ends_with(['.', ' ']) {
-                Status::Error("이름 끝에 점이나 공백을 쓸 수 없음".into())
+                Status::Error(crate::t!("A name cannot end with a dot or space"))
             } else {
                 Status::Ok
             };
@@ -202,9 +202,9 @@ pub fn plan(rule: &Rule, items: &[(PathBuf, bool)], exists: impl Fn(&Path) -> bo
     for p in out.iter_mut().filter(|p| p.status == Status::Ok) {
         let k = (p.from.parent().unwrap_or(Path::new("")).to_path_buf(), key(&p.new_name));
         if by_target[&k] > 1 {
-            p.status = Status::Error("같은 이름이 둘 이상 생김".into());
+            p.status = Status::Error(crate::t!("Two or more items would get the same name"));
         } else if !moving.contains(&k) && exists(&p.from.with_file_name(&p.new_name)) {
-            p.status = Status::Error("같은 이름이 이미 있음".into());
+            p.status = Status::Error(crate::t!("An item with that name already exists"));
         }
     }
     Ok(out)

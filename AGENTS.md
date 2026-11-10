@@ -69,7 +69,7 @@ cargo fmt                               # 포맷 (rustfmt 설정 파일은 없�
 
 ## 코드 관례
 
-- UI 문자열과 사용자에게 보이는 오류 메시지는 **한국어**입니다. 코드 주석은 영어를 씁니다.
+- UI 문자열과 사용자에게 보이는 오류 메시지는 **영어가 원문, 한국어가 번역**입니다. Rust 문자열은 `t!("English {}", arg)`(`core/src/i18n.rs`), Slint 문자열은 `@tr("English")`로 쓰고, 번역은 각각 `core/i18n/*.tsv`(`영어<TAB>한국어`)와 `ui/lang/ko/LC_MESSAGES/fex.po`에 추가합니다. 번역이 빠지면 `cargo test -p fex-core i18n`이 실패합니다. 언어는 Windows 표시 언어를 따르고 `FEX_LANG=ko|en`으로 덮어쓸 수 있습니다. 설치 프로그램 문구는 `installer/fex.iss`의 `[CustomMessages]`입니다. 코드 주석도 영어를 씁니다.
 - 기존 코드는 간결한 한 줄 구조체/표현식을 선호합니다. 주변 스타일을 따르고, 불필요한 추상화를 만들지 마세요.
 - `// ponytail:` 주석은 "지금은 이렇게 두고, 필요해지면 개선한다"는 표시입니다. 관련 최적화를 할 때는 주석도 함께 정리하세요.
 - 오류는 `io::Result`/`Result<_, String>`로 전달하고, UI에는 `set_note`로 짧게 보여 줍니다. `unwrap()`은 테스트나 불변식이 확실한 곳에만 쓰세요.

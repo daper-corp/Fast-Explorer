@@ -455,14 +455,14 @@ pub fn encode_results(out: &mut impl Write, hits: &[Hit], indexing: usize, more:
 }
 
 pub fn decode_results(input: impl BufRead) -> io::Result<Results> {
-    let bad = || io::Error::new(io::ErrorKind::InvalidData, "잘못된 응답");
+    let bad = || io::Error::new(io::ErrorKind::InvalidData, crate::t!("Invalid reply"));
     let mut lines = input.lines();
     let head = lines.next().ok_or_else(bad)??;
     let mut f = head.split('\t');
     match f.next() {
         Some(REPLY_OK) => {}
         Some("OK") => {
-            return Err(io::Error::new(io::ErrorKind::InvalidInput, "인덱스 서비스가 오래됨 · 다시 설치하세요"));
+            return Err(io::Error::new(io::ErrorKind::InvalidInput, crate::t!("Index service is outdated · reinstall it")));
         }
         Some("ERR") => return Err(io::Error::new(io::ErrorKind::InvalidInput, f.next().unwrap_or("").to_string())),
         _ => return Err(bad()),
@@ -497,7 +497,7 @@ pub fn query(scope: &Scope, text: &str, limit: usize) -> Result<Results, QueryEr
     unsafe { GetNamedPipeServerProcessId(HANDLE(pipe.as_raw_handle()), &mut server_pid) }
         .map_err(|e| QueryError::Unavailable(e.to_string()))?;
     if server_pid != service_pid {
-        return Err(QueryError::Unavailable("검색 파이프의 주인이 인덱스 서비스가 아님".into()));
+        return Err(QueryError::Unavailable(crate::t!("The search pipe is not owned by the index service")));
     }
     let query = text.replace(['\t', '\r', '\n'], " ");
     let (kind, path) = encode_scope(scope);
@@ -519,7 +519,7 @@ fn open_pipe() -> io::Result<std::fs::File> {
             r => return r,
         }
     }
-    Err(io::Error::other("검색 파이프가 계속 사용 중"))
+    Err(io::Error::other(crate::t!("The search pipe stays busy")))
 }
 
 /// The running service's process id.
@@ -544,7 +544,7 @@ fn service_pid() -> Result<u32, QueryError> {
         let _ = CloseServiceHandle(svc);
         r.map_err(|e| QueryError::Unavailable(e.to_string()))?;
         match status.dwProcessId {
-            0 => Err(QueryError::Unavailable("인덱스 서비스가 실행 중이 아님".into())),
+            0 => Err(QueryError::Unavailable(crate::t!("The index service is not running"))),
             pid => Ok(pid),
         }
     }

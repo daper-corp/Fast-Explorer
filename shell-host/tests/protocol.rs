@@ -26,7 +26,7 @@ fn serves_menus_and_recovers_after_being_killed() {
     let items = host.wait(2, wait).expect("answered").expect("menu built");
     eprintln!("item menu (warm host): {:?}", t.elapsed());
 
-    // Running a command from the menu: "바로 가기 만들기" (verb "link") makes a .lnk next to a.txt.
+    // Running a command from the menu: "Create shortcut" (verb "link") makes a .lnk next to a.txt.
     let link = items.iter().find(|i| i.verb == "link").expect("link item");
     host.send(&Request::Invoke { seq: 2, id: link.id }).unwrap();
     assert_eq!(done_rx.recv_timeout(wait).unwrap(), (2, Ok(())));
@@ -35,7 +35,7 @@ fn serves_menus_and_recovers_after_being_killed() {
 
     host.send(&Request::Background { seq: 3, folder: dir.clone() }).unwrap();
     let bg = host.wait(3, wait).expect("answered").expect("menu built");
-    assert!(bg.iter().any(|i| i.submenu), "background menu has a submenu (새로 만들기): {bg:#?}");
+    assert!(bg.iter().any(|i| i.submenu), "background menu has a submenu (New): {bg:#?}");
 
     // A crashed host is replaced on the next request.
     let pid = host.pid().unwrap();
