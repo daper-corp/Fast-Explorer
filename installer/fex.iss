@@ -80,6 +80,11 @@ var Code: Integer;
 begin
   if FileExists(ExpandConstant('{app}\fex-index.exe')) then
     Exec(ExpandConstant('{app}\fex-index.exe'), 'uninstall', '', SW_HIDE, ewWaitUntilTerminated, Code);
+  // Error 5 (access denied) on DeleteFile means a copy is still running; the shell-host child and
+  // extra windows are not always caught by CloseApplications, so end them here.
+  Exec(ExpandConstant('{sys}	askkill.exe'), '/F /IM fex-shell-host.exe', '', SW_HIDE, ewWaitUntilTerminated, Code);
+  Exec(ExpandConstant('{sys}	askkill.exe'), '/F /IM fex.exe', '', SW_HIDE, ewWaitUntilTerminated, Code);
+  Sleep(500);
   Result := '';
 end;
 
