@@ -248,20 +248,26 @@ component OptionChoice inherits Rectangle {
         padding-left: 4px;
         spacing: 7px;
         alignment: start;
+        // A layout pins a fixed-height child to the top; this wrapper fills the row so the
+        // circle can be centered against the text.
         Rectangle {
             width: 14px;
-            height: 14px;
-            border-radius: 7px;
-            border-width: 1px;
-            border-color: root.selected ? Palette.accent-background : Palette.foreground.transparentize(0.5);
-            background: transparent;
-            if root.selected: Rectangle {
-                x: 3px;
-                y: 3px;
-                width: 8px;
-                height: 8px;
-                border-radius: 4px;
-                background: Palette.accent-background;
+            Rectangle {
+                y: (parent.height - self.height) / 2;
+                width: 14px;
+                height: 14px;
+                border-radius: 7px;
+                border-width: 1px;
+                border-color: root.selected ? Palette.accent-background : Palette.foreground.transparentize(0.5);
+                background: transparent;
+                if root.selected: Rectangle {
+                    x: 3px;
+                    y: 3px;
+                    width: 8px;
+                    height: 8px;
+                    border-radius: 4px;
+                    background: Palette.accent-background;
+                }
             }
         }
         Text {
@@ -820,6 +826,7 @@ export component AppWindow inherits Window {
 
     private property <length> w-name: root.search-mode ? 280px : 440px;
     private property <length> w-location: 210px;
+    private property <bool> show-location: root.search-mode && root.search-view == 0;
     private property <length> w-date: 150px;
     private property <length> w-kind: 130px;
     private property <length> w-size: 100px;
@@ -1298,7 +1305,7 @@ export component AppWindow inherits Window {
                                     root.w-name = min(name-header.max-column-width, name-header.fit-width);
                                 }
                             }
-                            if root.search-mode: location-header := HeaderCell {
+                            if root.show-location: location-header := HeaderCell {
                                 width: root.w-location;
                                 min-column-width: 90px;
                                 max-column-width: max(90px, header-bar.width - root.list-margin - 7px - root.blank-right - root.w-name);
@@ -1314,7 +1321,7 @@ export component AppWindow inherits Window {
                             date-header := HeaderCell {
                                 width: root.w-date;
                                 min-column-width: 100px;
-                                max-column-width: max(100px, header-bar.width - root.list-margin - 7px - root.blank-right - root.w-name - (root.search-mode ? root.w-location : 0px));
+                                max-column-width: max(100px, header-bar.width - root.list-margin - 7px - root.blank-right - root.w-name - (root.show-location ? root.w-location : 0px));
                                 fit-width: max(100px, measure-date.preferred-width + 22px);
                                 text: root.this-pc && !root.search-mode ? "여유 공간" : "수정한 날짜";
                                 sorted: root.sort-column == 1;
@@ -1332,7 +1339,7 @@ export component AppWindow inherits Window {
                             kind-header := HeaderCell {
                                 width: root.w-kind;
                                 min-column-width: 70px;
-                                max-column-width: max(70px, header-bar.width - root.list-margin - 7px - root.blank-right - root.w-name - (root.search-mode ? root.w-location : 0px) - root.w-date);
+                                max-column-width: max(70px, header-bar.width - root.list-margin - 7px - root.blank-right - root.w-name - (root.show-location ? root.w-location : 0px) - root.w-date);
                                 fit-width: max(70px, measure-kind.preferred-width + 22px);
                                 text: "유형";
                                 sorted: root.sort-column == 2;
@@ -1350,7 +1357,7 @@ export component AppWindow inherits Window {
                             size-header := HeaderCell {
                                 width: root.w-size;
                                 min-column-width: 70px;
-                                max-column-width: max(70px, header-bar.width - root.list-margin - 7px - root.blank-right - root.w-name - (root.search-mode ? root.w-location : 0px) - root.w-date - root.w-kind);
+                                max-column-width: max(70px, header-bar.width - root.list-margin - 7px - root.blank-right - root.w-name - (root.show-location ? root.w-location : 0px) - root.w-date - root.w-kind);
                                 fit-width: max(70px, measure-size.preferred-width + 22px);
                                 text: root.this-pc && !root.search-mode ? "전체 용량" : "크기";
                                 sorted: root.sort-column == 3;
@@ -1427,7 +1434,7 @@ export component AppWindow inherits Window {
                                 // Columns end before the right edge; what lies beyond acts as blank space.
                                 private property <length> cols-w: min(
                                     parent.width - root.blank-right,
-                                    6px + root.w-name + (root.search-mode ? root.w-location : 0px) + root.w-date + root.w-kind + root.w-size);
+                                    6px + root.w-name + (root.show-location ? root.w-location : 0px) + root.w-date + root.w-kind + root.w-size);
                                 Rectangle {
                                     x: 0px;
                                     width: parent.cols-w;
@@ -1570,7 +1577,7 @@ export component AppWindow inherits Window {
                                             }
                                         }
                                     }
-                                    if root.search-mode: TailText {
+                                    if root.show-location: TailText {
                                         width: root.w-location;
                                         text: r.location;
                                         text-color: root.dim;
