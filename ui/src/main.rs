@@ -3190,7 +3190,20 @@ impl App {
     fn set_drop_row(&self, row: Option<usize>) {
         let row = row.map_or(-1, |r| r as i32);
         if self.drop_row.replace(row) != row {
-            self.ui().set_drop_row(row);
+            let ui = self.ui();
+            ui.set_drop_row(row);
+            let rect = (row >= 0).then(|| {
+                let (s, rh) = (ui.window().scale_factor(), ui.get_row_height());
+                let mut tl = POINT {
+                    x: (ui.get_list_origin_x() * s) as i32,
+                    y: ((ui.get_list_origin_y() + ui.get_list_y() + row as f32 * rh) * s) as i32,
+                };
+                unsafe {
+                    let _ = ClientToScreen(HWND(self.hwnd() as _), &mut tl);
+                }
+                RECT { left: tl.x, top: tl.y, right: tl.x + (ui.get_list_width() * s) as i32, bottom: tl.y + (rh * s) as i32 }
+            });
+            dnd::highlight(rect);
         }
     }
 

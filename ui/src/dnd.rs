@@ -322,3 +322,59 @@ unsafe fn hdrop_files(data: &IDataObject) -> Option<Vec<PathBuf>> {
         Some(paths)
     }
 }
+
+thread_local! {
+    static OVERLAY: std::cell::Cell<isize> = const { std::cell::Cell::new(0) };
+}
+
+/// Tints `rect` (screen px) with a click-through translucent window, or hides it on `None`.
+/// Slint cannot repaint inside DoDragDrop's modal loop, so the drop-target highlight is native.
+pub fn highlight(rect: Option<windows::Win32::Foundation::RECT>) {
+    use windows::Win32::Graphics::Gdi::CreateSolidBrush;
+    use windows::Win32::UI::WindowsAndMessaging::*;
+    unsafe {
+        let mut h = OVERLAY.get();
+        let Some(r) = rect else {
+            if h != 0 {
+                let _ = ShowWindow(HWND(h as _), SW_HIDE);
+            }
+            return;
+        };
+        if h == 0 {
+            let class = windows::core::w!("FexDropHighlight");
+            let wc = WNDCLASSEXW {
+                cbSize: size_of::<WNDCLASSEXW>() as u32,
+                lpfnWndProc: Some(overlay_proc),
+                hbrBackground: CreateSolidBrush(windows::Win32::Foundation::COLORREF(0x00D7_7800)), // accent blue (BGR)
+                lpszClassName: class,
+                ..Default::default()
+            };
+            RegisterClassExW(&wc);
+            let ex = WS_EX_LAYERED | WS_EX_TRANSPARENT | WS_EX_NOACTIVATE | WS_EX_TOOLWINDOW | WS_EX_TOPMOST;
+            let Ok(w) = CreateWindowExW(ex, class, PCWSTR::null(), WS_POPUP, 0, 0, 0, 0, None, None, None, None) else {
+                return;
+            };
+            let _ = SetLayeredWindowAttributes(w, windows::Win32::Foundation::COLORREF(0), 70, LWA_ALPHA);
+            h = w.0 as isize;
+            OVERLAY.set(h);
+        }
+        let _ = SetWindowPos(
+            HWND(h as _),
+            Some(HWND_TOPMOST),
+            r.left,
+            r.top,
+            r.right - r.left,
+            r.bottom - r.top,
+            SWP_NOACTIVATE | SWP_SHOWWINDOW,
+        );
+    }
+}
+
+unsafe extern "system" fn overlay_proc(
+    h: HWND,
+    m: u32,
+    w: windows::Win32::Foundation::WPARAM,
+    l: windows::Win32::Foundation::LPARAM,
+) -> windows::Win32::Foundation::LRESULT {
+    unsafe { windows::Win32::UI::WindowsAndMessaging::DefWindowProcW(h, m, w, l) }
+}
