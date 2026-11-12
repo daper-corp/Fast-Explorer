@@ -1036,6 +1036,18 @@ export component AppWindow inherits Window {
                 }
             }
 
+            // The tab layout above swallows pointer events, so re-cover the grey space the
+            // user sees as "title bar": the top margin and everything right of the last tab.
+            WindowMoveArea {
+                width: parent.width - 168px;
+                height: 6px;
+            }
+            WindowMoveArea {
+                x: 6px + min(tabs-flick.content-width, tabs-flick.width);
+                width: max(0px, parent.width - 168px - self.x - (root.update-available != "" ? 118px : 0px));
+                height: parent.height;
+            }
+
             // Where the dragged tab would land. Tabs are tab-w wide with 2px between.
             Rectangle {
                 visible: root.tab-dragging && root.tab-drag-to >= 0 && root.tab-drag-to != root.tab-drag-from;
@@ -1304,6 +1316,11 @@ export component AppWindow inherits Window {
                         root.search-options-open = !root.search-options-open;
                     }
                 }
+            }
+
+            Rectangle {
+                height: 1px;
+                background: Palette.border;
             }
 
             // Sidebar + file list
@@ -1733,6 +1750,10 @@ export component AppWindow inherits Window {
             }
 
             // Status bar
+            Rectangle {
+                height: 1px;
+                background: Palette.border;
+            }
             HorizontalLayout {
                 padding: 6px;
                 padding-left: 10px;
