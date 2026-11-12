@@ -612,6 +612,8 @@ struct App {
     /// The newest search; workers for older ones stop and their results are dropped.
     search_seq: Arc<AtomicU64>,
     install_offered: Cell<bool>,
+    /// A newer release found by a check, offered by the title bar button.
+    pending_update: RefCell<Option<update::Release>>,
     /// Sidebar: user folders, the default locations, and the mounted drives.
     favorites: RefCell<Vec<PathBuf>>,
     desktop: Option<PathBuf>,
@@ -2472,10 +2474,9 @@ impl App {
         });
     }
 
-    /// Looks for a newer release on a worker thread and shows the outcome in the settings panel.
-    /// Installing always asks first and runs the installer (UAC); we quit so it can replace files.
-    fn check_update(&self) {
-        let hwnd = self.hwnd();
+    /// Looks for a newer release on a worker thread. A found release shows the title bar's update
+    /// button; `manual` (the settings button) also offers to install it right away.
+    fn check_update(&self, manual: bool) {
         self.ui().set_update_status(t!("Checking…").into());
         thread::spawn(move || {
             let found = update::check();
@@ -2485,10 +2486,28 @@ impl App {
                 Ok(None) => t!("You're up to date"),
                 Err(e) => t!("Check failed: {}", e),
             };
-            post(move |a| a.ui().set_update_status(status.into()));
-            let Ok(Some(rel)) = found else { return };
+            post(move |a| {
+                a.ui().set_update_status(status.into());
+                if let Ok(Some(rel)) = found {
+                    a.ui().set_update_available(rel.version.clone().into());
+                    *a.pending_update.borrow_mut() = Some(rel);
+                    if manual {
+                        a.install_update();
+                    }
+                }
+            });
+        });
+    }
+
+    /// Asks, downloads and runs the installer (UAC); we quit so it can replace files.
+    fn install_update(&self) {
+        let Some(rel) = self.pending_update.borrow().clone() else { return };
+        let hwnd = self.hwnd();
+        thread::spawn(move || {
             let ask = t!(
-                "Version v{} is available (current v{}).\n\nDownload and install it now? Fast Explorer will close during installation.",
+                "Version v{} is available (current v{}).
+
+Download and install it now? Fast Explorer will close during installation.",
                 rel.version,
                 update::CURRENT
             );
@@ -4157,7 +4176,6 @@ fn main() -> Result<(), slint::PlatformError> {
         _ => 0,
     });
     ui.set_app_version(update::CURRENT.into());
-    ui.set_auto_update(update::auto_enabled());
     ui.set_this_pc_path(THIS_PC.into());
     start_icon_worker();
 
@@ -4183,6 +4201,7 @@ fn main() -> Result<(), slint::PlatformError> {
             menu_busy: Cell::new(false),
             search_seq: Arc::default(),
             install_offered: Cell::new(false),
+            pending_update: RefCell::default(),
             favorites: RefCell::new(favorites),
             desktop,
             downloads,
@@ -4268,9 +4287,9 @@ fn main() -> Result<(), slint::PlatformError> {
         a.delete(false);
     }));
     ui.on_view_changed(|| app(|a| a.view_changed()));
-    ui.on_auto_update_changed(|| app(|a| update::set_auto(a.ui().get_auto_update())));
+    ui.on_install_update(|| app(|a| a.install_update()));
     ui.on_lang_changed(|i| app(|a| a.set_language(i)));
-    ui.on_check_update(|| app(|a| a.check_update()));
+    ui.on_check_update(|| app(|a| a.check_update(true)));
     ui.on_suggest(|t| app(|a| a.suggest(&t)));
     ui.on_suggest_cancel(|| app(|a| a.cancel_suggest()));
     ui.on_key(|e, in_list| {
@@ -4292,7 +4311,7 @@ fn main() -> Result<(), slint::PlatformError> {
         app(|a| a.new_tab(start));
     }
     if update::auto_due() {
-        app(|a| a.check_update());
+        app(|a| a.check_update(false));
     }
     ui.run()
 }

@@ -22,7 +22,8 @@ ArchitecturesAllowed=x64compatible
 ArchitecturesInstallIn64BitMode=x64compatible
 Compression=lzma2
 SolidCompression=yes
-CloseApplications=yes
+; Restart Manager cannot close our hidden shell-host processes; PrepareToInstall ends them instead.
+CloseApplications=no
 RestartApplications=no
 WizardStyle=modern
 
@@ -76,15 +77,18 @@ Filename: "{app}\fex-index.exe"; Parameters: "uninstall"; Flags: runhidden; RunO
 [Code]
 // An upgrade: stop and remove the running service first so its exe can be replaced.
 function PrepareToInstall(var NeedsRestart: Boolean): String;
-var Code: Integer;
+var Code, I: Integer;
 begin
   if FileExists(ExpandConstant('{app}\fex-index.exe')) then
     Exec(ExpandConstant('{app}\fex-index.exe'), 'uninstall', '', SW_HIDE, ewWaitUntilTerminated, Code);
   // Error 5 (access denied) on DeleteFile means a copy is still running; the shell-host child and
   // extra windows are not always caught by CloseApplications, so end them here.
-  Exec(ExpandConstant('{sys}\taskkill.exe'), '/F /IM fex-shell-host.exe', '', SW_HIDE, ewWaitUntilTerminated, Code);
-  Exec(ExpandConstant('{sys}\taskkill.exe'), '/F /IM fex.exe', '', SW_HIDE, ewWaitUntilTerminated, Code);
-  Sleep(500);
+  // The app goes first so it cannot respawn a host; repeat in case a copy was still starting.
+  for I := 1 to 3 do begin
+    Exec(ExpandConstant('{sys}\taskkill.exe'), '/F /IM fex.exe', '', SW_HIDE, ewWaitUntilTerminated, Code);
+    Exec(ExpandConstant('{sys}\taskkill.exe'), '/F /IM fex-shell-host.exe', '', SW_HIDE, ewWaitUntilTerminated, Code);
+    Sleep(300);
+  end;
   Result := '';
 end;
 

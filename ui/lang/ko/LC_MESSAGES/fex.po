@@ -108,8 +108,8 @@ msgstr "이름 바꾸기"
 msgid "Name"
 msgstr "이름"
 
-msgid "Check for updates automatically (once a day)"
-msgstr "자동으로 업데이트 확인 (하루 한 번)"
+msgid "Update to v{}"
+msgstr "v{}로 업데이트"
 
 msgid "Apply to"
 msgstr "적용 대상"
@@ -179,3 +179,6 @@ msgstr "언어"
 
 msgid "System default"
 msgstr "시스템 기본값"
+
+msgid "Search"
+msgstr "검색"

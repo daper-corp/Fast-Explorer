@@ -429,8 +429,8 @@ component CrumbButton inherits Rectangle {
     background: touch.has-hover ? Palette.foreground.transparentize(0.88) : transparent;
 
     HorizontalLayout {
-        padding-left: 6px;
-        padding-right: 6px;
+        padding-left: 3px;
+        padding-right: 3px;
         alignment: center;
         Text {
             text: root.title;
@@ -705,7 +705,7 @@ export component AppWindow inherits Window {
     private property <bool> settings-open: false;
     // Settings panel: update check.
     in property <string> app-version;
-    in-out property <bool> auto-update;
+    in property <string> update-available;
     in property <string> update-status;
     in-out property <bool> show-hidden;
     in-out property <bool> show-ext;
@@ -747,7 +747,7 @@ export component AppWindow inherits Window {
     callback navigate(string);
     callback search(string);
     callback search-options-changed();
-    callback auto-update-changed();
+    callback install-update();
     in-out property <string> home-path;
     callback home-changed(string);
     callback home-use-current();
@@ -1047,6 +1047,21 @@ export component AppWindow inherits Window {
                 background: Palette.accent-background;
             }
 
+            // A newer release was found by the daily check: one click asks to install it.
+            if root.update-available != "": Rectangle {
+                x: parent.width - 168px - 118px;
+                width: 118px;
+                height: parent.height;
+                background: Palette.alternate-background;
+                Button {
+                    text: @tr("Update to v{}", root.update-available);
+                    primary: true;
+                    clicked => {
+                        root.install-update();
+                    }
+                }
+            }
+
             // Custom window controls (the native title bar is gone).
             Rectangle {
                 x: parent.width - 168px;
@@ -1241,7 +1256,7 @@ export component AppWindow inherits Window {
                                         // Inner box is 28px tall; crumbs are 22px, so center both the same way.
                                         padding-top: 3px;
                                         if i > 0: Text {
-                                            width: 14px;
+                                            width: 8px;
                                             height: 22px;
                                             text: "\\";
                                             horizontal-alignment: center;
@@ -1270,12 +1285,15 @@ export component AppWindow inherits Window {
                         }
                     }
                 }
+                // Narrow until it is clicked (focused) or holds a query.
                 search-box := LineEdit {
-                    width: 340px;
+                    property <bool> wide: self.has-focus || root.search-text != "";
+                    width: wide ? 340px : 170px;
+                    animate width { duration: 120ms; easing: ease-out; }
                     enabled: !root.this-pc;
                     placeholder-text: root.this-pc
                         ? @tr("Search folders only")
-                        : @tr("Search (current + subfolders) · space AND · ; OR");
+                        : wide ? @tr("Search (current + subfolders) · space AND · ; OR") : @tr("Search");
                     text <=> root.search-text;
                     edited(t) => {
                         root.search(t);
@@ -1954,13 +1972,6 @@ export component AppWindow inherits Window {
 
                 Text { text: @tr("Updates"); font-size: 12px; color: root.dim; }
                 Text { text: "Fast Explorer v" + root.app-version; color: Palette.foreground; }
-                CheckBox {
-                    text: @tr("Check for updates automatically (once a day)");
-                    checked <=> root.auto-update;
-                    changed checked => {
-                        root.auto-update-changed();
-                    }
-                }
                 HorizontalLayout {
                     spacing: 8px;
                     Button {

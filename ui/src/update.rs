@@ -11,6 +11,7 @@ const CHECK_EVERY: u64 = 24 * 3600;
 
 pub const CURRENT: &str = env!("CARGO_PKG_VERSION");
 
+#[derive(Clone)]
 pub struct Release {
     pub version: String,
     pub url: String,
@@ -74,35 +75,22 @@ fn now() -> u64 {
     SystemTime::now().duration_since(UNIX_EPOCH).map_or(0, |d| d.as_secs())
 }
 
-/// `update.txt`: (last check in unix seconds, automatic checks on).
-fn load() -> (u64, bool) {
+/// `update.txt` holds `last=<unix seconds of the last check>`.
+fn last_check() -> u64 {
     let text = stamp_file().and_then(|f| std::fs::read_to_string(f).ok()).unwrap_or_default();
-    let last = text.lines().find_map(|l| l.strip_prefix("last=")).and_then(|n| n.trim().parse().ok()).unwrap_or(0);
-    (last, !text.lines().any(|l| l.trim() == "auto=0"))
+    text.lines().find_map(|l| l.strip_prefix("last=")).and_then(|n| n.trim().parse().ok()).unwrap_or(0)
 }
 
-fn save(last: u64, auto: bool) {
-    let Some(file) = stamp_file() else { return };
-    let _ = std::fs::create_dir_all(file.parent().unwrap());
-    let _ = std::fs::write(file, format!("last={last}\r\nauto={}\r\n", auto as u8));
-}
-
-pub fn auto_enabled() -> bool {
-    load().1
-}
-
-pub fn set_auto(on: bool) {
-    save(load().0, on);
-}
-
-/// Automatic checks are on and the last one was a day or more ago.
+/// The last check was a day or more ago.
 pub fn auto_due() -> bool {
-    let (last, auto) = load();
-    auto && now().saturating_sub(last) >= CHECK_EVERY
+    now().saturating_sub(last_check()) >= CHECK_EVERY
 }
 
 pub fn mark_checked() {
-    save(now(), auto_enabled());
+    let Some(file) = stamp_file() else { return };
+    let _ = std::fs::create_dir_all(file.parent().unwrap());
+    let _ = std::fs::write(file, format!("last={}
+", now()));
 }
 
 fn session_file() -> Option<PathBuf> {

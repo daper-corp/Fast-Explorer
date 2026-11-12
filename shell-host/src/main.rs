@@ -24,12 +24,11 @@ use windows::Win32::UI::WindowsAndMessaging::{
     CreatePopupMenu, CreateWindowExW, DefWindowProcW, DestroyMenu, DispatchMessageW, GetMenuItemCount,
     GetMenuItemInfoW, GetMessageW, HMENU, MENUITEMINFOW, MFS_DEFAULT, MFS_DISABLED, MFT_SEPARATOR, MIIM_BITMAP, MIIM_FTYPE,
     MIIM_ID, MIIM_STATE, MIIM_STRING, MIIM_SUBMENU, MSG, PostMessageW, PostQuitMessage, RegisterClassW,
-    SW_SHOWNORMAL, TranslateMessage, WINDOW_EX_STYLE, WM_APP, WM_INITMENUPOPUP, WNDCLASSW, WS_POPUP,
+    SW_SHOWNORMAL, TranslateMessage, WINDOW_EX_STYLE, WM_APP, WM_CLOSE, WM_DESTROY, WM_ENDSESSION, WM_INITMENUPOPUP, WNDCLASSW, WS_POPUP,
 };
 use windows::core::{Error, HSTRING, Interface, PCSTR, PCWSTR, PSTR, PWSTR, Result, w};
 
 const WM_REQUEST: u32 = WM_APP;
-const WM_STDIN_CLOSED: u32 = WM_APP + 1;
 const CMIC_MASK_UNICODE: u32 = 0x4000;
 const LAST_ID: u32 = 0x7FFF;
 
@@ -99,7 +98,9 @@ fn main() -> Result<()> {
                 QUEUE.lock().unwrap().push(line);
                 post(WM_REQUEST);
             }
-            post(WM_STDIN_CLOSED); // Fast Explorer is gone
+            // Fast Explorer is gone. Exit right here: the window thread may be stuck in a shell
+            // extension, and a host that outlives its parent blocks the installer.
+            std::process::exit(0);
         });
 
         let mut msg = MSG::default();
@@ -117,7 +118,8 @@ extern "system" fn wndproc(hwnd: HWND, msg: u32, wp: WPARAM, lp: LPARAM) -> LRES
             handle_queue(hwnd);
             LRESULT(0)
         }
-        WM_STDIN_CLOSED => {
+        // Installer / Restart Manager / session end ask us to close: really exit, not just lose the window.
+        WM_CLOSE | WM_DESTROY | WM_ENDSESSION => {
             unsafe { PostQuitMessage(0) };
             LRESULT(0)
         }
