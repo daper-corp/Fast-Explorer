@@ -2505,9 +2505,7 @@ impl App {
         let hwnd = self.hwnd();
         thread::spawn(move || {
             let ask = t!(
-                "Version v{} is available (current v{}).
-
-Download and install it now? Fast Explorer will close during installation.",
+                "Version v{} is available (current v{}).\n\nDownload and install it now? Fast Explorer will close during installation.",
                 rel.version,
                 update::CURRENT
             );
