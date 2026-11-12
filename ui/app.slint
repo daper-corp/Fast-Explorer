@@ -422,6 +422,7 @@ component TailText inherits Rectangle {
 component CrumbButton inherits Rectangle {
     in property <string> title;
     callback clicked;
+    callback open-tab;
 
     horizontal-stretch: 0;
     height: 22px;
@@ -445,6 +446,11 @@ component CrumbButton inherits Rectangle {
         mouse-cursor: pointer;
         clicked => {
             root.clicked();
+        }
+        pointer-event(e) => {
+            if e.kind == PointerEventKind.down && e.button == PointerEventButton.middle {
+                root.open-tab();
+            }
         }
     }
 }
@@ -1279,6 +1285,9 @@ export component AppWindow inherits Window {
                                             title: c.title;
                                             clicked => {
                                                 root.place-open(c.path);
+                                            }
+                                            open-tab => {
+                                                root.place-open-tab(c.path);
                                             }
                                         }
                                     }
