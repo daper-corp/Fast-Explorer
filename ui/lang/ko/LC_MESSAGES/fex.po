@@ -12,8 +12,8 @@ msgstr "C:\\ (비우면 기본값)"
 msgid "{{n}} = number, {{n:3}} = 001  (regex: $1, $2)"
 msgstr "{n} = 번호, {n:3} = 001  (정규식: $1, $2)"
 
-msgid "Search (current + subfolders) · space AND · ; OR"
-msgstr "검색 (현재+하위) · 공백 AND · ; OR"
+msgid "Search (current + subfolders) · space AND · ; OR · ! exclude"
+msgstr "검색 (현재+하위) · 공백 AND · ; OR · ! 제외"
 
 msgid "Search in"
 msgstr "검색 대상"

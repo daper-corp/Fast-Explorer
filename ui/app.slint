@@ -1293,7 +1293,7 @@ export component AppWindow inherits Window {
                     enabled: !root.this-pc;
                     placeholder-text: root.this-pc
                         ? @tr("Search folders only")
-                        : wide ? @tr("Search (current + subfolders) · space AND · ; OR") : @tr("Search");
+                        : wide ? @tr("Search (current + subfolders) · space AND · ; OR · ! exclude") : @tr("Search");
                     text <=> root.search-text;
                     edited(t) => {
                         root.search(t);

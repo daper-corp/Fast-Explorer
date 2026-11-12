@@ -191,6 +191,7 @@ impl Volume {
     fn matches(&self, pattern: &Pattern, scope: &Scope) -> Vec<u32> {
         let threads = std::thread::available_parallelism().map_or(4, |n| n.get());
         let chunk = self.recs.len().div_ceil(threads).max(1 << 14);
+        let needs_path = pattern.needs_path() || !matches!(scope, Scope::All);
         std::thread::scope(|s| {
             let handles: Vec<_> = self
                 .recs
@@ -204,10 +205,11 @@ impl Volume {
                             .filter(|(i, r)| {
                                 r.frn != DEAD
                                     && pattern.matches(self.name(r))
-                                    && (matches!(scope, Scope::All)
-                                        || self
-                                            .path(base + *i as u32)
-                                            .is_some_and(|p| scope.includes(std::path::Path::new(&p))))
+                                    && (!needs_path
+                                        || self.path(base + *i as u32).is_some_and(|p| {
+                                            scope.includes(std::path::Path::new(&p))
+                                                && (!pattern.needs_path() || pattern.matches_path(&p, scope.root()))
+                                        }))
                             })
                             .map(|(i, _)| base + i as u32)
                             .collect::<Vec<_>>()

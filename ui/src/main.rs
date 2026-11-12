@@ -2001,9 +2001,11 @@ impl App {
                     return false; // typed on; a newer search is running
                 }
                 for e in batch {
-                    if pattern.matches(&e.name()) {
+                    let path = root.join(e.os_name());
+                    if pattern.matches(&e.name())
+                        && (!pattern.needs_path() || pattern.matches_path(&path.to_string_lossy(), Some(&root)))
+                    {
                         let dir = e.is_dir();
-                        let path = root.join(e.os_name());
                         tree.insert(&mut entries, &path, dir, Some(e), Some(&root));
                         count += 1;
                         if count >= SEARCH_LIMIT {

@@ -84,7 +84,38 @@ enum Inner {
     /// The whole query is one regular expression (case-insensitive unless it says otherwise).
     Regex(Regex),
     /// Semicolon-separated OR groups; every word in a group must match.
-    Groups(Vec<Vec<Word>>),
+    Groups(Vec<Group>),
+}
+
+/// One OR group: words that must all match, and `!` words that must not.
+#[derive(Debug)]
+struct Group {
+    pos: Vec<Term>,
+    neg: Vec<Term>,
+}
+
+/// A word, matched against the name, or against the whole path when it has a separator.
+#[derive(Debug)]
+struct Term {
+    word: Word,
+    path: bool,
+}
+
+impl Term {
+    fn new(text: &str) -> Self {
+        if !text.contains(['\\', '/']) {
+            return Term { word: word(text), path: false };
+        }
+        let mut t = text.replace('/', "\\").replace("\\**\\", "\\");
+        // A path glob may start anywhere in the path unless it names a drive or share.
+        if t.contains(['*', '?']) && !is_absolute_prefix(&t) && !t.starts_with('*') {
+            t.insert(0, '*');
+        }
+        while t.contains("**") {
+            t = t.replace("**", "*");
+        }
+        Term { word: word(&t), path: true }
+    }
 }
 
 impl Pattern {
@@ -124,12 +155,19 @@ impl Pattern {
                 .map_err(|e| crate::t!("Regex error: {}", e))?;
             return Ok(Pattern(Inner::Regex(re)));
         }
-        let groups: Vec<Vec<Word>> = query
+        let groups: Vec<Group> = query
             .split(';')
-            .map(str::trim)
-            .filter(|g| !g.is_empty())
-            .map(|g| g.split_whitespace().map(word).collect())
-            .filter(|g: &Vec<Word>| !g.is_empty())
+            .map(|g| {
+                let mut group = Group { pos: Vec::new(), neg: Vec::new() };
+                for w in g.split_whitespace() {
+                    match w.strip_prefix('!').filter(|r| !r.is_empty()) {
+                        Some(rest) => group.neg.push(Term::new(rest)),
+                        None => group.pos.push(Term::new(w)),
+                    }
+                }
+                group
+            })
+            .filter(|g| !g.pos.is_empty() || !g.neg.is_empty())
             .collect();
         match groups.is_empty() {
             true => Err(crate::t!("Search query is empty")),
@@ -137,11 +175,58 @@ impl Pattern {
         }
     }
 
+    /// Checks `name` alone. When [`needs_path`](Self::needs_path) is true this is only a quick
+    /// prefilter (path words and `!` words are skipped); confirm hits with `matches_path`.
     pub fn matches(&self, name: &str) -> bool {
         match &self.0 {
             Inner::Regex(re) => re.is_match(name),
-            Inner::Groups(groups) => groups.iter().any(|g| g.iter().all(|w| w.matches(name))),
+            Inner::Groups(groups) => groups.iter().any(|g| g.pos.iter().all(|t| t.path || t.word.matches(name))),
         }
+    }
+
+    /// Whether a full path is needed to decide (path words or `!` words are present).
+    pub fn needs_path(&self) -> bool {
+        match &self.0 {
+            Inner::Regex(_) => false,
+            Inner::Groups(groups) => groups.iter().any(|g| !g.neg.is_empty() || g.pos.iter().any(|t| t.path)),
+        }
+    }
+
+    /// The full check for `path`. `root` is the searched folder: `!` words look only at the
+    /// part of the path below it, so a folder you are inside of is never excluded.
+    pub fn matches_path(&self, path: &str, root: Option<&Path>) -> bool {
+        let Inner::Groups(groups) = &self.0 else {
+            return self.matches(path.rsplit(['\\', '/']).next().unwrap_or(path));
+        };
+        let name = path.rsplit(['\\', '/']).next().unwrap_or(path);
+        let rel = &path[rel_start(path, root)..];
+        groups.iter().any(|g| {
+            g.pos.iter().all(|t| t.word.matches(if t.path { path } else { name }))
+                && !g.neg.iter().any(|t| match t.path {
+                    true => t.word.matches(path),
+                    false => rel.split(['\\', '/']).any(|c| t.word.matches(c)),
+                })
+        })
+    }
+
+    /// Whether a folder with this name can be skipped entirely (every OR group excludes it).
+    pub fn prunes(&self, dir_name: &str) -> bool {
+        match &self.0 {
+            Inner::Regex(_) => false,
+            Inner::Groups(groups) => groups.iter().all(|g| g.neg.iter().any(|t| !t.path && t.word.matches(dir_name))),
+        }
+    }
+}
+
+/// Byte offset in `path` where the part below `root` starts (0 without a root).
+fn rel_start(path: &str, root: Option<&Path>) -> usize {
+    let Some(len) = root.map(|r| r.as_os_str().len()) else { return 0 };
+    if len > path.len() || !path.is_char_boundary(len) {
+        return 0;
+    }
+    match path[len..].starts_with(['\\', '/']) {
+        true => len + 1,
+        false => len,
     }
 }
 
@@ -374,7 +459,11 @@ pub fn plan_mode(query: &str, cwd: &Path, scope: &Scope, regex: bool) -> Result<
     // Checking a UNC path could stall on an unreachable server; only local drives are checked.
     let local = is_drive_path(&root);
     if local && !root.is_dir() {
-        return Err(crate::t!("Folder not found: {}", root.display()));
+        if is_absolute_prefix(prefix) {
+            return Err(crate::t!("Folder not found: {}", root.display()));
+        }
+        // Not a folder here: the separators belong to path words (`src\ui`, `a;b\c`, `*\logs\*`).
+        return Ok(Plan { scope: scope.clone(), pattern: query.to_string() });
     }
     // Typing an existing folder path means "everything inside it"; a trailing name is the pattern.
     let mut pattern = name.to_string();
@@ -455,7 +544,12 @@ pub fn walk_names(root: &Path, pattern: &Pattern, found: impl Fn(PathBuf, bool) 
                 }
                 let Some(kind) = entry.file_type() else { return WalkState::Continue };
                 let name = entry.file_name().to_string_lossy();
-                if pattern.matches(&name) && !found(entry.into_path(), kind.is_dir()) {
+                if kind.is_dir() && pattern.prunes(&name) {
+                    return WalkState::Skip;
+                }
+                let hit = pattern.matches(&name)
+                    && (!pattern.needs_path() || pattern.matches_path(&entry.path().to_string_lossy(), Some(root)));
+                if hit && !found(entry.into_path(), kind.is_dir()) {
                     stop.store(true, Ordering::Relaxed);
                     return WalkState::Quit;
                 }
@@ -514,6 +608,43 @@ mod tests {
         assert!(!matches("a;b c", "b.txt"));
         assert!(matches("a;b c", "bc.txt"));
         assert!(Pattern::compile(";;").is_err());
+    }
+
+    fn path_hit(query: &str, path: &str) -> bool {
+        let p = Pattern::compile(query).unwrap();
+        let name = path.rsplit('\\').next().unwrap();
+        p.matches(name) && p.matches_path(path, Some(Path::new(r"D:\work")))
+    }
+
+    #[test]
+    fn path_words_and_exclusions() {
+        // Path words match the whole path; `**` and `/` work.
+        assert!(path_hit(r"src\ui main", r"D:\work\src\ui\main.rs"));
+        assert!(!path_hit(r"src\ui main", r"D:\work\src\core\main.rs"));
+        assert!(path_hit(r"docs\**\*.md", r"D:\work\docs\a\b\x.md"));
+        assert!(path_hit(r"docs\**\*.md", r"D:\work\docs\x.md"));
+        assert!(path_hit("docs/*.md", r"D:\work\docs\x.md"));
+        assert!(!path_hit(r"docs\*.md", r"D:\work\docs\x.txt"));
+        // `!` excludes by any folder or file name below the search root.
+        assert!(!path_hit("main !target", r"D:\work\target\debug\main.rs"));
+        assert!(path_hit("main !target", r"D:\work\src\main.rs"));
+        assert!(!path_hit("main !*.rs", r"D:\work\src\main.rs"));
+        assert!(path_hit("!tmp", r"D:\work\a.txt"));
+        // Folders above the search root are never excluded.
+        assert!(path_hit("main !work", r"D:\work\src\main.rs"));
+        // `!` applies per OR group; a lone or embedded `!` is literal.
+        assert!(path_hit("a !x;b", r"D:\work\x\b.txt"));
+        assert!(!path_hit("a !x;b", r"D:\work\x\a.txt"));
+        assert!(path_hit("a!b", r"D:\work\a!b.txt"));
+        // Only a folder every group excludes is pruned.
+        assert!(Pattern::compile("a !old;b !old").unwrap().prunes("old"));
+        assert!(!Pattern::compile("a !old;b").unwrap().prunes("old"));
+        // Separators inside OR groups no longer break planning.
+        let cwd = std::env::temp_dir();
+        let p = plan(r"a;b\c", &cwd, &Scope::All).unwrap();
+        assert_eq!(p.pattern, r"a;b\c");
+        assert!(path_hit(&p.pattern, r"D:\work\x\b\c.txt"));
+        assert!(plan(r"C:\no-such-folder-xyz\a", &cwd, &Scope::All).is_err());
     }
 
     #[test]
