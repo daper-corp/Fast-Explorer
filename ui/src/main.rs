@@ -698,6 +698,10 @@ impl App {
     // ---------- tabs ----------
 
     fn new_tab(&self, path: PathBuf) {
+        self.new_tab_after(path, None);
+    }
+
+    fn new_tab_after(&self, path: PathBuf, after: Option<After>) {
         let id = self.next_id.get();
         self.next_id.set(id + 1);
         let tab = Rc::new(Tab::new(id));
@@ -707,7 +711,7 @@ impl App {
             tabs.len() - 1
         };
         self.select_tab(i, i > 0);
-        self.navigate(&tab, path, Hist::Push, None);
+        self.navigate(&tab, path, Hist::Push, after);
     }
 
     /// Wheel-click: open in a new tab but stay on the current one.
@@ -4399,19 +4403,17 @@ fn main() -> Result<(), slint::PlatformError> {
         app(|a| a.key(&e.text, e.modifiers.control, e.modifiers.shift, e.modifiers.alt, in_list))
     });
 
-    let session = if std::env::args().nth(1).is_none() { update::take_session() } else { None };
+    let args: Vec<String> = std::env::args().skip(1).collect();
+    let session = if args.is_empty() { update::take_session() } else { None };
     if let Some((active, tabs)) = session {
         for t in tabs {
             app(|a| a.new_tab(t));
         }
         app(|a| a.select_tab(active, true));
     } else {
-        let start = match std::env::args().nth(1) {
-            Some(s) if is_this_pc_name(&s) => PathBuf::from(THIS_PC),
-            Some(s) => PathBuf::from(s),
-            None => home_path(),
-        };
-        app(|a| a.new_tab(start));
+        let (start, select) = start_target(&args);
+        let after = select.map(|n| After { select: vec![n], ..Default::default() });
+        app(|a| a.new_tab_after(start, after));
     }
     if update::auto_due() {
         app(|a| a.check_update(false));
@@ -4419,9 +4421,50 @@ fn main() -> Result<(), slint::PlatformError> {
     ui.run()
 }
 
+/// Start folder and optional file to select from the command line. Accepts a folder, a file
+/// (opens its folder and selects it) and Explorer's `/select,<path>` form.
+fn start_target(args: &[String]) -> (PathBuf, Option<String>) {
+    let mut path = None;
+    let mut select = false;
+    let mut it = args.iter();
+    while let Some(a) = it.next() {
+        if a.len() >= 8 && a[..8].eq_ignore_ascii_case("/select,") {
+            select = true;
+            let rest = a[8..].trim();
+            path = if rest.is_empty() { it.next().cloned() } else { Some(rest.to_string()) };
+        } else if a.starts_with('/') && a.ends_with(',') {
+            // other Explorer switches such as `/e,` are ignored
+        } else {
+            path = Some(a.clone());
+        }
+    }
+    let Some(p) = path else { return (home_path(), None) };
+    if is_this_pc_name(&p) {
+        return (PathBuf::from(THIS_PC), None);
+    }
+    let p = PathBuf::from(p.trim_matches('"'));
+    match p.parent() {
+        Some(dir) if select || !p.is_dir() => {
+            let name = p.file_name().map(|n| n.to_string_lossy().into_owned());
+            (dir.to_path_buf(), name)
+        }
+        _ => (p, None),
+    }
+}
+
 #[cfg(test)]
 mod tests {
     use fex_core::t;
+
+    #[test]
+    fn start_target_forms() {
+        let s = |v: &[&str]| super::start_target(&v.iter().map(|s| s.to_string()).collect::<Vec<_>>());
+        let want = (std::path::PathBuf::from(r"C:\dl"), Some("a b.zip".to_string()));
+        assert_eq!(s(&[r"/select,C:\dl\a b.zip"]), want);
+        assert_eq!(s(&["/select,", r"C:\dl\a b.zip"]), want);
+        assert_eq!(s(&["/E,", "/Select,", r"C:\dl\a b.zip"]), want);
+        assert_eq!(s(&[r"C:\Windows"]), (std::path::PathBuf::from(r"C:\Windows"), None));
+    }
 
     #[test]
     fn crumbs_from_the_drive_root() {
