@@ -27,7 +27,8 @@ use windows::Win32::Graphics::Dwm::{
     DWMWA_WINDOW_CORNER_PREFERENCE, DWMWCP_DONOTROUND, DwmExtendFrameIntoClientArea, DwmSetWindowAttribute,
 };
 use windows::Win32::Graphics::Gdi::{
-    ClientToScreen, GetMonitorInfoW, MONITORINFO, MONITOR_DEFAULTTONEAREST, MonitorFromWindow, ScreenToClient,
+    ClientToScreen, GetMonitorInfoW, MONITORINFO, MONITOR_DEFAULTTONEAREST, MonitorFromWindow, RDW_INVALIDATE,
+    RDW_UPDATENOW, RedrawWindow, ScreenToClient,
 };
 use windows::Win32::UI::Controls::MARGINS;
 use windows::Win32::UI::Input::KeyboardAndMouse::{GetAsyncKeyState, VK_LBUTTON};
@@ -1352,6 +1353,11 @@ impl App {
         let path = t.cwd.borrow().clone();
         let (key, desc) = t.sort.get();
         let (id, cancel) = (t.id, t.epoch.clone());
+        // Folders opened in the tree are read again with the listing, so the refresh keeps them open.
+        let open = match TREE_VIEW.load(Relaxed) {
+            true => t.rows.browse.borrow().as_ref().map(SearchTree::expanded_dirs).unwrap_or_default(),
+            false => Vec::new(),
+        };
         thread::spawn(move || {
             let start = Instant::now();
             let mut all = Vec::new();
@@ -1361,11 +1367,29 @@ impl App {
             });
             let took = start.elapsed();
             let order = display_order(&all, key, desc);
-            post(move |a| a.reloaded(id, epoch, all, order, took, res.err()));
+            let mut lists = Vec::new();
+            for dir in open.into_iter().take_while(|_| res.is_ok() && cancel.load(SeqCst) == epoch) {
+                let mut list = Vec::new();
+                // A folder that vanished or can't be read is simply left closed.
+                if list_dir(&dir, |b| { list.extend(b); true }).is_ok() {
+                    lists.push((dir, list));
+                }
+            }
+            post(move |a| a.reloaded(id, epoch, all, order, lists, took, res.err()));
         });
     }
 
-    fn reloaded(&self, id: u64, epoch: u64, all: Vec<Entry>, order: Vec<u32>, took: Duration, err: Option<io::Error>) {
+    #[allow(clippy::too_many_arguments)]
+    fn reloaded(
+        &self,
+        id: u64,
+        epoch: u64,
+        all: Vec<Entry>,
+        order: Vec<u32>,
+        open: Vec<(PathBuf, Vec<Entry>)>,
+        took: Duration,
+        err: Option<io::Error>,
+    ) {
         let Some(t) = self.current(id, epoch) else { return };
         let auto = t.after.borrow().as_ref().is_some_and(|a| a.auto);
         if let Some(e) = err {
@@ -1377,7 +1401,13 @@ impl App {
         t.bump_sort();
         t.rows.replace(all, order);
         if TREE_VIEW.load(Relaxed) {
-            self.browse_flatten(&t); // ponytail: a refresh collapses opened folders
+            {
+                let mut entries = t.rows.entries.borrow_mut();
+                let mut browse = t.rows.browse.borrow_mut();
+                let tree = browse.get_or_insert_with(|| SearchTree::browse(&entries, &t.cwd.borrow()));
+                tree.restore(Arc::make_mut(&mut entries), open);
+            }
+            self.browse_flatten(&t);
         }
         t.list_ms.set(ms(took));
         t.cursor.set(None);
@@ -1503,10 +1533,10 @@ impl App {
         let sel = t.rows.selection();
         let rows = if sel.contains(&idx) { sel } else { vec![idx] };
         let paths: Vec<PathBuf> = rows.into_iter().map(|i| t.path_of(i)).collect();
-        // DoDragDrop runs its own modal loop; start it once the pointer event is done.
+        // DoDragDrop runs its own modal loop; it starts once the pointer event is done.
         let id = t.id;
-        slint::Timer::single_shot(Duration::ZERO, move || {
-            if let Some(moved) = dnd::start_drag(paths) {
+        dnd::start_drag(paths, move |moved| {
+            if let Some(moved) = moved {
                 // OLE consumes the mouse release that ended the drag; tell the widgets the
                 // button is up so the row does not stay stuck in its pressed state.
                 app(|a| a.end_drag_pointer());
@@ -3195,9 +3225,18 @@ impl App {
         let row = ((y - oy - ui.get_list_y()) / ui.get_row_height().max(1.0)).floor();
         if row >= 0.0
             && let Some(i) = t.rows.entry(row as usize)
-            && t.rows.is_dir(i)
         {
-            return Some((t.path_of(i), Some(row as usize)));
+            if t.rows.is_dir(i) {
+                return Some((t.path_of(i), Some(row as usize)));
+            }
+            // In a tree, a file inside an expanded folder drops into that folder.
+            let nested = t.rows.meta.borrow().get(i as usize).is_some_and(|m| m.depth > 0);
+            if nested && let Some(parent) = t.path_of(i).parent().map(Path::to_path_buf) {
+                let parent_row = (0..row as usize).rev().find(|&r| {
+                    t.rows.entry(r).is_some_and(|p| t.rows.is_dir(p) && t.path_of(p) == parent)
+                });
+                return Some((parent, parent_row));
+            }
         }
         let cwd = t.cwd.borrow().clone();
         if is_this_pc(&cwd) {
@@ -3209,21 +3248,77 @@ impl App {
     fn set_drop_row(&self, row: Option<usize>) {
         let row = row.map_or(-1, |r| r as i32);
         if self.drop_row.replace(row) != row {
-            let ui = self.ui();
-            ui.set_drop_row(row);
-            let rect = (row >= 0).then(|| {
-                let (s, rh) = (ui.window().scale_factor(), ui.get_row_height());
-                let mut tl = POINT {
-                    x: (ui.get_list_origin_x() * s) as i32,
-                    y: ((ui.get_list_origin_y() + ui.get_list_y() + row as f32 * rh) * s) as i32,
-                };
-                unsafe {
-                    let _ = ClientToScreen(HWND(self.hwnd() as _), &mut tl);
-                }
-                RECT { left: tl.x, top: tl.y, right: tl.x + (ui.get_list_width() * s) as i32, bottom: tl.y + (rh * s) as i32 }
-            });
-            dnd::highlight(rect);
+            self.ui().set_drop_row(row);
+            self.place_highlight(row);
         }
+    }
+
+    /// Puts the native drop highlight over `row` (or hides it for a negative row).
+    fn place_highlight(&self, row: i32) {
+        let ui = self.ui();
+        let rect = (row >= 0).then(|| {
+            let (s, rh) = (ui.window().scale_factor(), ui.get_row_height());
+            let mut tl = POINT {
+                x: (ui.get_list_origin_x() * s) as i32,
+                y: ((ui.get_list_origin_y() + ui.get_list_y() + row as f32 * rh) * s) as i32,
+            };
+            unsafe {
+                let _ = ClientToScreen(HWND(self.hwnd() as _), &mut tl);
+            }
+            RECT { left: tl.x, top: tl.y, right: tl.x + (ui.get_list_width() * s) as i32, bottom: tl.y + (rh * s) as i32 }
+        });
+        dnd::highlight(rect);
+    }
+
+    /// Called on every DragOver: scrolls the list while the pointer is near its top or bottom edge.
+    fn drag_autoscroll(&self, x: i32, y: i32) {
+        let ui = self.ui();
+        let scale = ui.window().scale_factor();
+        let mut pt = POINT { x, y };
+        unsafe {
+            let _ = ScreenToClient(HWND(self.hwnd() as _), &mut pt);
+        }
+        let (x, y) = (pt.x as f32 / scale, pt.y as f32 / scale);
+        let (ox, oy, rh) = (ui.get_list_origin_x(), ui.get_list_origin_y(), ui.get_row_height().max(1.0));
+        let h = ui.get_list_height();
+        // Past the edge (header or status bar) counts too, so a fast drag still scrolls.
+        if x < ox || x > ox + ui.get_list_width() || y < oy - 3.0 * rh || y > oy + h + 3.0 * rh {
+            return;
+        }
+        let edge = rh * 1.5;
+        let (up, depth) = if y - oy < edge {
+            (true, (edge - (y - oy)) / edge)
+        } else if oy + h - y < edge {
+            (false, (edge - (oy + h - y)) / edge)
+        } else {
+            return;
+        };
+        let step = depth.clamp(0.15, 1.0) * rh * 0.75;
+        self.drag_scroll_by(if up { step } else { -step });
+    }
+
+    /// The mouse wheel turned during a drag (`delta` in wheel units, 120 per notch, up positive).
+    fn drag_wheel(&self, delta: i32) {
+        let rh = self.ui().get_row_height().max(1.0);
+        self.drag_scroll_by(delta as f32 / 120.0 * rh * 3.0);
+    }
+
+    /// Moves the list content by `dy` px (positive scrolls up), repainting while a drag blocks the loop.
+    fn drag_scroll_by(&self, dy: f32) {
+        let ui = self.ui();
+        let (rh, h) = (ui.get_row_height().max(1.0), ui.get_list_height());
+        let min = -((self.tab().rows.len() as f32 * rh + 4.0 - h).max(0.0)); // 4.0 = list-vmargin
+        let cur = ui.get_list_y();
+        let next = (cur + dy).clamp(min, 0.0);
+        if next == cur {
+            return;
+        }
+        ui.set_list_y(next);
+        // ponytail: DoDragDrop runs its own loop; force the repaint, and move the highlight with its row.
+        unsafe {
+            let _ = RedrawWindow(Some(HWND(self.hwnd() as _)), None, None, RDW_INVALIDATE | RDW_UPDATENOW);
+        }
+        self.place_highlight(self.drop_row.get());
     }
 
     /// Runs a native drop on a worker (it can show progress/conflict dialogs), then refreshes.
@@ -4111,7 +4206,7 @@ fn install_native_hooks(weak: slint::Weak<AppWindow>, tries: u32) {
             fit_window_to_screen(&ui, HWND(hwnd as _));
             apply_window_frame(HWND(hwnd as _));
             install_history_buttons(hwnd);
-            dnd::install(hwnd, dnd::Hooks { target_at: dnd_target_at, dropped: dnd_dropped, hover: dnd_hover });
+            dnd::install(hwnd, dnd::Hooks { target_at: dnd_target_at, dropped: dnd_dropped, hover: dnd_hover, scroll: dnd_scroll, wheel: dnd_wheel });
         } else if tries < 100 {
             install_native_hooks(weak.clone(), tries + 1);
         }
@@ -4128,6 +4223,14 @@ fn dnd_dropped(files: Vec<PathBuf>, target: PathBuf, move_: bool) {
 
 fn dnd_hover(row: Option<usize>) {
     app(|a| a.set_drop_row(row));
+}
+
+fn dnd_scroll(x: i32, y: i32) {
+    app(|a| a.drag_autoscroll(x, y));
+}
+
+fn dnd_wheel(delta: i32) {
+    app(|a| a.drag_wheel(delta));
 }
 
 /// Release builds have no console, so a panic would end the app silently: record it.

@@ -30,6 +30,10 @@ pub struct Hooks {
     pub dropped: fn(Vec<PathBuf>, PathBuf, bool),
     /// Highlights a folder row, or clears the highlight.
     pub hover: fn(Option<usize>),
+    /// Called on every DragOver with the screen point, to scroll the list near its edges.
+    pub scroll: fn(i32, i32),
+    /// The mouse wheel turned during a drag we started; the delta is in wheel units (120 per notch).
+    pub wheel: fn(i32),
 }
 
 static HOOKS: OnceLock<Hooks> = OnceLock::new();
@@ -55,19 +59,96 @@ pub fn install(hwnd: isize, hooks: Hooks) {
     }
 }
 
-/// Starts an OLE drag of `paths`; blocks until the drop finishes. `None` means the drag could
-/// not start, otherwise whether the effect was MOVE (the caller then refreshes the folders).
-pub fn start_drag(paths: Vec<PathBuf>) -> Option<bool> {
+struct Job {
+    paths: Vec<PathBuf>,
+    done: Box<dyn FnOnce(Option<bool>)>,
+}
+
+thread_local! {
+    static DRAG_WINDOW: std::cell::Cell<isize> = const { std::cell::Cell::new(0) };
+}
+
+/// Starts an OLE drag of `paths` and calls `done` once the drop finishes: `None` means the
+/// drag could not start, otherwise whether the effect was MOVE (the caller then refreshes).
+/// The drag runs from a plain Win32 message, not from inside a Slint/winit callback: winit
+/// buffers repaints while its handler is running, so the list could not scroll during a drag.
+pub fn start_drag(paths: Vec<PathBuf>, done: impl FnOnce(Option<bool>) + 'static) {
+    use windows::Win32::Foundation::{LPARAM, WPARAM};
+    use windows::Win32::UI::WindowsAndMessaging::*;
+    unsafe {
+        let mut h = DRAG_WINDOW.get();
+        if h == 0 {
+            let class = windows::core::w!("FexDragStarter");
+            let wc = WNDCLASSEXW {
+                cbSize: size_of::<WNDCLASSEXW>() as u32,
+                lpfnWndProc: Some(drag_proc),
+                lpszClassName: class,
+                ..Default::default()
+            };
+            RegisterClassExW(&wc);
+            if let Ok(w) = CreateWindowExW(Default::default(), class, PCWSTR::null(), WS_POPUP, 0, 0, 0, 0, Some(HWND_MESSAGE), None, None, None) {
+                h = w.0 as isize;
+                DRAG_WINDOW.set(h);
+            }
+        }
+        let job = Box::into_raw(Box::new(Job { paths, done: Box::new(done) }));
+        if h == 0 || PostMessageW(Some(HWND(h as _)), WM_APP, WPARAM(0), LPARAM(job as isize)).is_err() {
+            drop(Box::from_raw(job)); // the drag never started
+        }
+    }
+}
+
+unsafe extern "system" fn drag_proc(
+    h: HWND,
+    m: u32,
+    w: windows::Win32::Foundation::WPARAM,
+    l: windows::Win32::Foundation::LPARAM,
+) -> windows::Win32::Foundation::LRESULT {
+    use windows::Win32::UI::WindowsAndMessaging::*;
+    if m == WM_APP {
+        let job = unsafe { Box::from_raw(l.0 as *mut Job) };
+        let Job { paths, done } = *job;
+        done(run_drag(paths));
+        return windows::Win32::Foundation::LRESULT(0);
+    }
+    unsafe { DefWindowProcW(h, m, w, l) }
+}
+
+fn run_drag(paths: Vec<PathBuf>) -> Option<bool> {
     if paths.is_empty() {
         return None;
     }
+    use windows::Win32::System::Threading::GetCurrentThreadId;
+    use windows::Win32::UI::WindowsAndMessaging::{SetWindowsHookExW, UnhookWindowsHookEx, WH_GETMESSAGE};
     unsafe {
         let data = shell_data_object(&paths)?;
         let source: IDropSource = DropSource(()).into();
         let mut effect = DROPEFFECT_NONE;
+        // DoDragDrop's loop eats the wheel; a message hook still sees it as it is read.
+        let hook = SetWindowsHookExW(WH_GETMESSAGE, Some(wheel_hook), None, GetCurrentThreadId()).ok();
         let r = DoDragDrop(&data, &source, DROPEFFECT_COPY | DROPEFFECT_MOVE, &mut effect);
+        if let Some(hook) = hook {
+            let _ = UnhookWindowsHookEx(hook);
+        }
         Some(r == DRAGDROP_S_DROP && effect.0 & DROPEFFECT_MOVE.0 != 0)
     }
+}
+
+unsafe extern "system" fn wheel_hook(
+    code: i32,
+    w: windows::Win32::Foundation::WPARAM,
+    l: windows::Win32::Foundation::LPARAM,
+) -> windows::Win32::Foundation::LRESULT {
+    use windows::Win32::UI::WindowsAndMessaging::{CallNextHookEx, MSG, PM_REMOVE, WM_MOUSEWHEEL};
+    if code >= 0 && w.0 as u32 == PM_REMOVE.0 {
+        let msg = unsafe { &*(l.0 as *const MSG) };
+        if msg.message == WM_MOUSEWHEEL
+            && let Some(h) = hooks()
+        {
+            (h.wheel)(((msg.wParam.0 >> 16) as i16).into());
+        }
+    }
+    unsafe { CallNextHookEx(None, code, w, l) }
 }
 
 #[implement(IDropSource)]
@@ -258,7 +339,11 @@ impl IDropTarget_Impl for DropTarget_Impl {
     }
 
     fn DragOver(&self, keys: MODIFIERKEYS_FLAGS, pt: &POINTL, effect: *mut DROPEFFECT) -> WinResult<()> {
-        self.over(pt, keys, effect)
+        let result = self.over(pt, keys, effect);
+        if let Some(h) = hooks() {
+            (h.scroll)(pt.x, pt.y);
+        }
+        result
     }
 
     fn DragLeave(&self) -> WinResult<()> {

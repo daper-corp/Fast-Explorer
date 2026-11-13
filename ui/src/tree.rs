@@ -164,6 +164,25 @@ impl SearchTree {
         n.expanded = true;
     }
 
+    /// Paths of the expanded folders that have children, parents before their children.
+    pub fn expanded_dirs(&self) -> Vec<PathBuf> {
+        let mut dirs: Vec<PathBuf> =
+            self.nodes.iter().filter(|n| n.expanded && !n.children.is_empty()).map(|n| n.path.clone()).collect();
+        dirs.sort_by_key(|p| p.components().count());
+        dirs
+    }
+
+    /// Re-expands folders whose listings were read ahead (parents first); vanished ones are skipped.
+    pub fn restore(&mut self, entries: &mut Vec<Entry>, lists: Vec<(PathBuf, Vec<Entry>)>) {
+        for (path, list) in lists {
+            if let Some(&node) = self.by_path.get(&path_key(&path))
+                && self.is_unread(node)
+            {
+                self.add_children(entries, node, list);
+            }
+        }
+    }
+
     /// The node's full path, for opening/dragging a row.
     pub fn path(&self, node: u32) -> Option<&Path> {
         self.nodes.get(node as usize).map(|n| n.path.as_path())
@@ -432,6 +451,26 @@ mod tests {
         assert!(tree.toggle(dir)); // collapse
         let flat = show(&tree, &entries);
         assert_eq!(names(&tree, &entries, &flat), ["dir", "a.txt", "b.txt"]);
+    }
+
+    #[test]
+    fn browse_tree_restores_expanded_folders() {
+        let mut entries = vec![entry("dir", true, 0)];
+        let mut tree = SearchTree::browse(&entries, Path::new(r"C:\x"));
+        tree.add_children(&mut entries, 0, vec![entry("sub", true, 0)]);
+        tree.add_children(&mut entries, 1, vec![entry("in.txt", false, 0)]);
+        let open = tree.expanded_dirs();
+        assert_eq!(open, [PathBuf::from(r"C:\x\dir"), PathBuf::from(r"C:\x\dir\sub")]);
+        let lists = vec![
+            (open[0].clone(), vec![entry("sub", true, 0)]),
+            (open[1].clone(), vec![entry("in.txt", false, 0)]),
+            (PathBuf::from(r"C:\x\gone"), vec![entry("z", false, 0)]),
+        ];
+        let mut entries = vec![entry("dir", true, 0)];
+        let mut fresh = SearchTree::browse(&entries, Path::new(r"C:\x"));
+        fresh.restore(&mut entries, lists);
+        let flat = fresh.flatten(&entries, SortKey::Name, false, false, true, true, true);
+        assert_eq!(names(&fresh, &entries, &flat), ["dir", "sub", "in.txt"]);
     }
 
     #[test]
