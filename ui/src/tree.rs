@@ -156,7 +156,8 @@ impl SearchTree {
         for e in list {
             let (path, is_dir) = (dir.join(e.os_name()), e.is_dir());
             let kid = self.push(entries, Some(node), path, e, true);
-            self.nodes[kid as usize].unread = is_dir;
+            let k = &mut self.nodes[kid as usize];
+            (k.unread, k.expanded) = (is_dir, false);
         }
         let n = &mut self.nodes[node as usize];
         n.unread = false;
