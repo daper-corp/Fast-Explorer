@@ -2510,8 +2510,8 @@ impl App {
         });
     }
 
-    /// Looks for a newer release on a worker thread. A found release shows the title bar's update
-    /// button; `manual` (the settings button) also offers to install it right away.
+    /// Looks for a newer release on a worker thread. A found release puts a badge on the settings
+    /// gear and an update button in the settings panel; `manual` (the settings button) also offers to install it right away.
     fn check_update(&self, manual: bool) {
         self.ui().set_update_status(t!("Checking…").into());
         thread::spawn(move || {
@@ -4411,7 +4411,10 @@ fn main() -> Result<(), slint::PlatformError> {
         }
         app(|a| a.select_tab(active, true));
     } else {
-        let (start, select) = start_target(&args);
+        let (start, mut select) = start_target(&args);
+        if select.is_none() && args.len() == 1 && start.is_dir() && launched_by_browser() {
+            select = newest_recent_file(&start);
+        }
         let after = select.map(|n| After { select: vec![n], ..Default::default() });
         app(|a| a.new_tab_after(start, after));
     }
@@ -4419,6 +4422,48 @@ fn main() -> Result<(), slint::PlatformError> {
         app(|a| a.check_update(false));
     }
     ui.run()
+}
+
+/// Chrome's "Show in folder" reaches us as a bare folder: the shell drops the file to select.
+/// ponytail: guess the file just downloaded (newest, last 10 min); precise only for fresh downloads.
+fn newest_recent_file(dir: &Path) -> Option<String> {
+    let limit = std::time::Duration::from_secs(600);
+    let now = std::time::SystemTime::now();
+    std::fs::read_dir(dir)
+        .ok()?
+        .flatten()
+        .filter_map(|e| {
+            let m = e.metadata().ok().filter(|m| m.is_file())?;
+            let age = now.duration_since(m.modified().ok()?).unwrap_or_default();
+            (age <= limit).then(|| (age, e.file_name().to_string_lossy().into_owned()))
+        })
+        .min()
+        .map(|(_, name)| name)
+}
+
+/// True when the parent process (the caller of the shell open) is a Chromium browser.
+fn launched_by_browser() -> bool {
+    use windows::Win32::System::Diagnostics::ToolHelp::*;
+    use windows::Win32::System::Threading::GetCurrentProcessId;
+    let procs = || -> Option<Vec<PROCESSENTRY32W>> {
+        let snap = unsafe { CreateToolhelp32Snapshot(TH32CS_SNAPPROCESS, 0) }.ok()?;
+        let mut v = Vec::new();
+        let mut e = PROCESSENTRY32W { dwSize: std::mem::size_of::<PROCESSENTRY32W>() as u32, ..Default::default() };
+        let mut ok = unsafe { Process32FirstW(snap, &mut e) }.is_ok();
+        while ok {
+            v.push(e);
+            ok = unsafe { Process32NextW(snap, &mut e) }.is_ok();
+        }
+        let _ = unsafe { windows::Win32::Foundation::CloseHandle(snap) };
+        Some(v)
+    };
+    let Some(v) = procs() else { return false };
+    let me = unsafe { GetCurrentProcessId() };
+    let Some(parent) = v.iter().find(|p| p.th32ProcessID == me).map(|p| p.th32ParentProcessID) else { return false };
+    v.iter().find(|p| p.th32ProcessID == parent).is_some_and(|p| {
+        let n = String::from_utf16_lossy(&p.szExeFile).trim_end_matches('\0').to_ascii_lowercase();
+        n == "chrome.exe" || n == "msedge.exe"
+    })
 }
 
 /// Start folder and optional file to select from the command line. Accepts a folder, a file
