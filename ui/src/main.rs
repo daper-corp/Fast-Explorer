@@ -243,6 +243,8 @@ impl Model for Rows {
             editing: self.editing.get() == Some(i),
             cut,
             hidden: e.attrs & 0x2 != 0,
+            online: e.online_only(),
+            pinned: e.pinned(),
             stem: stem as i32,
             name: name.into(),
             location: self.locations.borrow().get(i as usize).map(|s| s.as_str().into()).unwrap_or_default(),
@@ -1856,7 +1858,13 @@ impl App {
         {
             return self.navigate(t, t.path_of(i), Hist::Push, None);
         }
-        let files: Vec<PathBuf> = idxs.into_iter().filter(|&i| !t.rows.is_dir(i)).map(|i| t.path_of(i)).collect();
+        let files: Vec<u32> = idxs.into_iter().filter(|&i| !t.rows.is_dir(i)).collect();
+        // The handler blocks until a cloud placeholder is fully downloaded; say why nothing happens yet.
+        if let Some(&i) = files.iter().find(|&&i| t.rows.entries.borrow()[i as usize].online_only()) {
+            let name = t.rows.entries.borrow()[i as usize].name();
+            self.set_note(t, t!("Downloading from the cloud before opening: {}", name));
+        }
+        let files: Vec<PathBuf> = files.into_iter().map(|i| t.path_of(i)).collect();
         let id = t.id;
         thread::spawn(move || {
             for f in files {

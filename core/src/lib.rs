@@ -62,6 +62,18 @@ impl Entry {
         self.attrs & FILE_ATTRIBUTE_DIRECTORY.0 != 0
     }
 
+    /// Cloud file (OneDrive, Synology Drive, ...) whose data is not on this PC yet:
+    /// any program reading it waits until the whole file is downloaded.
+    pub fn online_only(&self) -> bool {
+        // FILE_ATTRIBUTE_RECALL_ON_DATA_ACCESS | FILE_ATTRIBUTE_OFFLINE
+        !self.is_dir() && self.attrs & (0x40_0000 | 0x1000) != 0
+    }
+
+    /// Cloud item set to "Always keep on this device".
+    pub fn pinned(&self) -> bool {
+        self.attrs & 0x8_0000 != 0 // FILE_ATTRIBUTE_PINNED
+    }
+
     /// Extension without the dot, NUL-terminated (empty for folders / no dot).
     fn ext_wide(&self) -> &[u16] {
         let end = self.name.len() - 1;
@@ -264,6 +276,16 @@ mod tests {
         let elapsed = t.elapsed();
         assert_eq!(n, std::fs::read_dir(dir).unwrap().count());
         eprintln!("System32: {n} entries in {batches} batches, {elapsed:?}");
+    }
+
+    #[test]
+    fn cloud_states_from_attributes() {
+        // Raw attributes seen in OneDrive / Synology Drive folders.
+        let e = |attrs| Entry::new(std::ffi::OsStr::new("a.zip"), 0, 0, attrs);
+        assert!(e(0x40_1620).online_only()); // online-only placeholder
+        assert!(!e(0x420).online_only()); // downloaded
+        assert!(e(0x8_0420).pinned() && !e(0x8_0420).online_only()); // always keep
+        assert!(!e(0x40_0010).online_only()); // folders are never "online-only" files
     }
 
     #[test]

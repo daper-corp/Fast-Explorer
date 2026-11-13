@@ -11,6 +11,10 @@ export struct Row {
     cut: bool,
     // Has the Hidden attribute (shown translucent when "Show hidden items" is on).
     hidden: bool,
+    // Cloud file whose data is only on the server (opening it downloads it first).
+    online: bool,
+    // Cloud item set to "Always keep on this device".
+    pinned: bool,
     // UTF-8 byte length of the name without its extension (pre-selected when renaming).
     stem: int,
     // Folder of a search hit; empty when browsing a folder.
@@ -1602,10 +1606,33 @@ export component AppWindow inherits Window {
                                     }
                                     // Cut items wait translucent, like Explorer, until pasted.
                                     opacity: r.cut || r.hidden ? 0.45 : 1;
-                                    Image {
+                                    Rectangle {
                                         width: 16px;
-                                        source: r.icon;
-                                        image-fit: contain;
+                                        Image {
+                                            width: 16px;
+                                            source: r.icon;
+                                            image-fit: contain;
+                                        }
+                                        // Cloud status badge in the icon's corner, like Explorer's overlay.
+                                        if r.online || r.pinned: Rectangle {
+                                            x: -2px;
+                                            y: parent.height / 2 + 1px;
+                                            width: 10px;
+                                            height: 10px;
+                                            border-radius: 5px;
+                                            background: r.pinned ? #2e9e44 : Palette.background;
+                                            Path {
+                                                width: 10px;
+                                                height: 10px;
+                                                viewbox-width: 10;
+                                                viewbox-height: 10;
+                                                fill: transparent;
+                                                stroke: r.pinned ? white : #2f7fd8;
+                                                stroke-width: 1.2px;
+                                                // Check mark for "always keep", cloud outline for online-only.
+                                                commands: r.pinned ? "M 2.5 5.2 L 4.3 7 L 7.6 3.3" : "M 2.6 7.5 A 1.8 1.8 0 0 1 2.8 4 A 2.4 2.4 0 0 1 7.2 4.2 A 1.7 1.7 0 0 1 7.4 7.5 Z";
+                                            }
+                                        }
                                     }
                                     Rectangle {
                                         width: 6px;
