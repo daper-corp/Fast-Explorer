@@ -915,6 +915,8 @@ export component AppWindow inherits Window {
             // Drag the window from the empty part of the tab strip. Stop short of the
             // caption buttons so they own every pointer event in their corner.
             WindowMoveArea {
+                x: 0px;
+                y: 0px;
                 width: parent.width - 168px;
                 height: 100%;
             }
@@ -1001,12 +1003,6 @@ export component AppWindow inherits Window {
                         padding-left: 10px;
                         padding-right: 4px;
                         spacing: 6px;
-                        Image {
-                            width: 16px;
-                            source: @image-url("assets/icon-32.png");
-                            image-fit: contain;
-                            opacity: i == root.active-tab ? 1 : 0.6;
-                        }
                         Text {
                             text: t.title;
                             overflow: elide;
@@ -1056,11 +1052,14 @@ export component AppWindow inherits Window {
             // The tab layout above swallows pointer events, so re-cover the grey space the
             // user sees as "title bar": the top margin and everything right of the last tab.
             WindowMoveArea {
+                x: 0px;
+                y: 0px;
                 width: parent.width - 168px;
                 height: 6px;
             }
             WindowMoveArea {
                 x: 6px + min(tabs-flick.content-width, tabs-flick.width);
+                y: 0px;
                 width: max(0px, parent.width - 168px - self.x);
                 height: parent.height;
             }
