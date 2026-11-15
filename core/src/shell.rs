@@ -25,7 +25,8 @@ use windows::Win32::System::DataExchange::{
 use windows::Win32::System::Memory::{GMEM_MOVEABLE, GlobalAlloc, GlobalLock, GlobalUnlock};
 use windows::Win32::System::Ole::{CF_HDROP, CF_UNICODETEXT};
 use windows::Win32::UI::Shell::{
-    BHID_SFObject, CMF_NORMAL, CMINVOKECOMMANDINFO, DROPFILES, DragQueryFileW, FOF_ALLOWUNDO, FOLDERID_Desktop,
+    BHID_SFObject, CMF_NORMAL, CMINVOKECOMMANDINFO, DROPFILES, DragQueryFileW, FOF_ALLOWUNDO, FOLDERID_ComputerFolder,
+    FOLDERID_Desktop,
     FOLDERID_Documents, FOLDERID_Downloads, FOLDERID_Music, FOLDERID_Pictures, FOLDERID_ProgramFiles,
     FOLDERID_RecycleBinFolder, FOLDERID_RoamingAppData, FOLDERID_Videos, GCS_VERBW, IContextMenu, IEnumIDList,
     IFileOperation, IShellFolder, IShellFolder2, IShellItem, KF_FLAG_DEFAULT, SHCONTF_FOLDERS, SHCONTF_NONFOLDERS,
@@ -379,7 +380,8 @@ pub fn drives() -> Vec<Drive> {
         start += len + 1;
         let wide: Vec<u16> = root.encode_utf16().chain(Some(0)).collect();
         let kind = unsafe { GetDriveTypeW(PCWSTR(wide.as_ptr())) };
-        if kind == DRIVE_UNKNOWN || kind == DRIVE_NO_ROOT_DIR {
+        // Virtual cloud drives (Google Drive, ...) may report an unknown type but still open.
+        if kind == DRIVE_NO_ROOT_DIR || (kind == DRIVE_UNKNOWN && !Path::new(&root).exists()) {
             continue;
         }
         let mut name = [0u16; 128];
@@ -407,7 +409,39 @@ pub fn drives() -> Vec<Drive> {
         };
         out.push(Drive { path: PathBuf::from(root), title, kind: kind_name });
     }
+    namespace_drives(&mut out);
     out
+}
+
+/// Adds path-backed entries Explorer lists under "This PC" that have no drive letter
+/// (cloud drives mounted as folders, network locations). Virtual items without a path are skipped.
+fn namespace_drives(out: &mut Vec<Drive>) {
+    let key = |p: &Path| p.to_string_lossy().trim_end_matches('\\').to_lowercase();
+    let _ = with_com(|| unsafe {
+        let pc: IShellItem = SHGetKnownFolderItem(&FOLDERID_ComputerFolder, KF_FLAG_DEFAULT, None)?;
+        let folder: IShellFolder = pc.BindToHandler(None, &BHID_SFObject)?;
+        let mut en: Option<IEnumIDList> = None;
+        let _ = folder.EnumObjects(HWND::default(), SHCONTF_FOLDERS.0 as u32, &mut en);
+        let Some(en) = en else { return Ok(()) };
+        loop {
+            let mut pidls: [*mut ITEMIDLIST; 1] = [std::ptr::null_mut()];
+            let mut n = 0u32;
+            let _ = en.Next(&mut pidls, Some(&mut n));
+            if n == 0 || pidls[0].is_null() {
+                break;
+            }
+            let pidl = pidls[0];
+            if let (Some(path), Some(title)) = (parsing_name(&folder, pidl), display_name(&folder, pidl)) {
+                let path = PathBuf::from(path);
+                if path.is_absolute() && path.is_dir() && !out.iter().any(|d| key(&d.path) == key(&path)) {
+                    let kind = if path.starts_with(r"\\") { "Network Drive" } else { "Drive" };
+                    out.push(Drive { path, title, kind });
+                }
+            }
+            CoTaskMemFree(Some(pidl as *const std::ffi::c_void));
+        }
+        Ok(())
+    });
 }
 
 /// Ejects a removable drive (`E:\`): lock, dismount, then ask the device to let go.
