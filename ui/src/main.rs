@@ -4263,6 +4263,11 @@ fn log_panics() {
 fn main() -> Result<(), slint::PlatformError> {
     log_panics();
     apply_saved_lang();
+    // The default OpenGL renderer needs ~1s to initialize; the plain file list renders fine on the CPU.
+    // An explicit SLINT_BACKEND still wins. ponytail: revisit if scrolling is slow on very large displays.
+    if std::env::var_os("SLINT_BACKEND").is_none() {
+        let _ = slint::BackendSelector::new().backend_name("winit".into()).renderer_name("software".into()).select();
+    }
     let ui = AppWindow::new()?;
     if fex_core::i18n::korean() {
         let _ = slint::select_bundled_translation("ko");
