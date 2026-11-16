@@ -4392,7 +4392,6 @@ fn main() -> Result<(), slint::PlatformError> {
     let desktop = shell::desktop().ok();
     let downloads = shell::downloads().ok();
     let favorites = load_favorites(desktop.as_deref(), downloads.as_deref());
-    let drives = shell::drives();
 
     APP.with(|a| {
         let _ = a.set(App {
@@ -4415,7 +4414,7 @@ fn main() -> Result<(), slint::PlatformError> {
             favorites: RefCell::new(favorites),
             desktop,
             downloads,
-            drives: RefCell::new(drives),
+            drives: RefCell::default(),
             devices_due: Cell::new(false),
             suggest_seq: Arc::default(),
             drag_armed: Cell::new(false),
@@ -4533,6 +4532,14 @@ fn main() -> Result<(), slint::PlatformError> {
     if update::auto_due() {
         app(|a| a.check_update(false));
     }
+    // Enumerating drives can block for seconds (network or cloud shares): fill the sidebar once the window is up.
+    thread::spawn(|| {
+        let drives = shell::drives();
+        post(move |a| {
+            *a.drives.borrow_mut() = drives;
+            a.sync_places();
+        });
+    });
     ui.run()
 }
 
