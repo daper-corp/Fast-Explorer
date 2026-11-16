@@ -2054,7 +2054,7 @@ export component AppWindow inherits Window {
                         }
                     }
                     if root.update-available != "": Button {
-                        text: @tr("Update to v{}", root.update-available);
+                        text: @tr("Install");
                         primary: true;
                         clicked => {
                             root.install-update();

@@ -108,8 +108,8 @@ msgstr "이름 바꾸기"
 msgid "Name"
 msgstr "이름"
 
-msgid "Update to v{}"
-msgstr "v{}로 업데이트"
+msgid "Install"
+msgstr "설치"
 
 msgid "Apply to"
 msgstr "적용 대상"
