@@ -600,7 +600,7 @@ struct App {
     ui: slint::Weak<AppWindow>,
     tabs: RefCell<Vec<Rc<Tab>>>,
     /// Folders of recently closed tabs, newest last (Ctrl+Shift+T).
-    closed: RefCell<Vec<PathBuf>>,
+    closed: RefCell<Vec<(usize, PathBuf)>>, // (tab index, folder)
     tab_model: Rc<VecModel<TabInfo>>,
     active: Cell<usize>,
     next_id: Cell<u64>,
@@ -703,17 +703,19 @@ impl App {
     // ---------- tabs ----------
 
     fn new_tab(&self, path: PathBuf) {
-        self.new_tab_after(path, None);
+        self.new_tab_after(path, None, usize::MAX);
     }
 
-    fn new_tab_after(&self, path: PathBuf, after: Option<After>) {
+    /// Opens at index `at` (clamped to the end).
+    fn new_tab_after(&self, path: PathBuf, after: Option<After>, at: usize) {
         let id = self.next_id.get();
         self.next_id.set(id + 1);
         let tab = Rc::new(Tab::new(id));
         let i = {
             let mut tabs = self.tabs.borrow_mut();
-            tabs.push(tab.clone());
-            tabs.len() - 1
+            let i = at.min(tabs.len());
+            tabs.insert(i, tab.clone());
+            i
         };
         self.select_tab(i, i > 0);
         self.navigate(&tab, path, Hist::Push, after);
@@ -760,7 +762,7 @@ impl App {
         closed.epoch.fetch_add(1, SeqCst);
         {
             let mut recent = self.closed.borrow_mut();
-            recent.push(closed.cwd.borrow().clone());
+            recent.push((i, closed.cwd.borrow().clone()));
             let extra = recent.len().saturating_sub(20);
             recent.drain(..extra);
         }
@@ -1843,9 +1845,9 @@ impl App {
         // Global shortcuts (also while the address bar has focus).
         match () {
             _ if ctrl && shift && ch == 't' => {
-                let path = self.closed.borrow_mut().pop();
-                if let Some(path) = path {
-                    self.new_tab(path);
+                let last = self.closed.borrow_mut().pop();
+                if let Some((at, path)) = last {
+                    self.new_tab_after(path, None, at);
                 }
             }
             _ if ctrl && ch == 't' => self.new_tab(home_path()),
@@ -4527,7 +4529,7 @@ fn main() -> Result<(), slint::PlatformError> {
             select = newest_recent_file(&start);
         }
         let after = select.map(|n| After { select: vec![n], ..Default::default() });
-        app(|a| a.new_tab_after(start, after));
+        app(|a| a.new_tab_after(start, after, usize::MAX));
     }
     if update::auto_due() {
         app(|a| a.check_update(false));
