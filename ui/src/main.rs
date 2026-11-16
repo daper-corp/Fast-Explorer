@@ -880,14 +880,36 @@ impl App {
 
     fn sync_tabs(&self) {
         let titles: Vec<TabInfo> =
-            self.tabs.borrow().iter().map(|t| TabInfo { title: t.title().into() }).collect();
+            self.tabs.borrow().iter().map(|t| TabInfo { id: t.id as i32, title: t.title().into() }).collect();
+        let old = self.tab_model.row_count();
         // Update in place when the count is unchanged: replacing the model would rebuild the
         // tab elements and drop the pointer grab of a tab drag in progress.
-        if titles.len() == self.tab_model.row_count() {
+        if titles.len() == old {
             for (i, t) in titles.into_iter().enumerate() {
-                if self.tab_model.row_data(i).is_none_or(|o| o.title != t.title) {
+                if self.tab_model.row_data(i).is_none_or(|o| o.id != t.id || o.title != t.title) {
                     self.tab_model.set_row_data(i, t);
                 }
+            }
+        } else if old > 0 && titles.len().abs_diff(old) == 1 {
+            // One tab opened or closed: insert/remove just that row so the others keep their
+            // elements, and animate it (the strip grows right / the gap closes leftwards).
+            let i = (0..titles.len().min(old))
+                .find(|&i| self.tab_model.row_data(i).is_none_or(|o| o.id != titles[i].id))
+                .unwrap_or(titles.len().min(old));
+            if titles.len() > old {
+                self.tab_model.insert(i, titles[i].clone());
+            } else {
+                self.tab_model.remove(i);
+                let ui = self.ui();
+                ui.set_gap_at(i as i32);
+                ui.set_gap_k(1.0);
+                ui.set_gap_k(0.0);
+                slint::Timer::single_shot(Duration::from_millis(170), || {
+                    post(|a| {
+                        a.ui().set_gap_at(-1);
+                        a.ui().set_gap_k(1.0);
+                    })
+                });
             }
         } else {
             self.tab_model.set_vec(titles);

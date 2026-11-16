@@ -29,6 +29,7 @@ export struct Row {
 }
 
 export struct TabInfo {
+    id: int,
     title: string,
 }
 
@@ -894,6 +895,10 @@ export component AppWindow inherits Window {
     // Tabs shrink (down to a minimum) to fit the strip, then the strip scrolls.
     private property <length> tab-w: min(200px, max(96px, (root.width - 244px) / max(root.tabs.length, 1) - 2px));
     private property <bool> tab-dragging: false;
+    // Close animation: a gap of the closed tab's width at index gap-at shrinks as gap-k goes 1 -> 0.
+    in property <int> gap-at: -1;
+    in-out property <float> gap-k: 1;
+    animate gap-k { duration: 150ms; easing: ease-out; }
 
     // The mouse's back/forward buttons work anywhere nothing more specific handles them.
     TouchArea {
@@ -952,8 +957,21 @@ export component AppWindow inherits Window {
                     content-width: root.tabs.length * (root.tab-w + 2px) + 34px;
                     HorizontalLayout {
                 spacing: 2px;
-                for t[i] in root.tabs: Rectangle {
-                    width: root.tab-w;
+                for t[i] in root.tabs: HorizontalLayout {
+                spacing: 0px;
+                // Gap left by a closed tab; it shrinks to nothing so the tabs on its right slide left.
+                Rectangle {
+                    width: root.gap-at == i ? (root.tab-w + 2px) * root.gap-k : 0px;
+                }
+                Rectangle {
+                    // New tabs grow in from the left edge to the right.
+                    private property <float> grow: 0;
+                    init => {
+                        self.grow = 1;
+                    }
+                    animate grow { duration: 150ms; easing: ease-out; }
+                    clip: true;
+                    width: root.tab-w * self.grow;
                     opacity: root.tab-dragging && root.tab-drag-from == i ? 0.45 : 1;
                     border-top-left-radius: 8px;
                     border-top-right-radius: 8px;
@@ -1047,6 +1065,10 @@ export component AppWindow inherits Window {
                             }
                         }
                     }
+                }
+                }
+                Rectangle {
+                    width: root.gap-at >= root.tabs.length ? (root.tab-w + 2px) * root.gap-k : 0px;
                 }
                 Rectangle {
                     width: 32px;
