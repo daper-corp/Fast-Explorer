@@ -148,10 +148,11 @@ component HeaderCell inherits Rectangle {
         background: transparent;
 
         Rectangle {
-            x: parent.width - 1px;
-            width: 1px;
-            height: 100%;
-            background: divider-touch.has-hover || divider-touch.pressed ? Palette.foreground.transparentize(0.55) : transparent;
+            x: parent.width - (divider-touch.has-hover || divider-touch.pressed ? 2px : 1px);
+            y: 5px;
+            width: divider-touch.has-hover || divider-touch.pressed ? 2px : 1px;
+            height: parent.height - 10px;
+            background: divider-touch.has-hover || divider-touch.pressed ? Palette.foreground.transparentize(0.2) : Palette.border;
         }
 
         divider-touch := TouchArea {
@@ -687,6 +688,13 @@ export component AppWindow inherits Window {
     no-frame: true;
     preferred-width: 1100px;
     preferred-height: 720px;
+    min-width: 320px;
+    min-height: 200px;
+    // Set on resize (not a layout binding) so narrow-only hiding can drop the items' space from the toolbar.
+    property <bool> narrow: false;
+    changed width => {
+        root.narrow = self.width < 480px;
+    }
     background: Palette.background;
     forward-focus: list-focus;
 
@@ -784,6 +792,10 @@ export component AppWindow inherits Window {
     callback tab-close(int);
     callback tab-new();
     callback tab-move(int, int);
+    // Tab drag beyond the strip: Rust shows a ghost under the pointer and, on release (true) or
+    // cancel (false), moves the tab to another fex window or out into its own window.
+    callback tab-drag(int);
+    callback tab-release(int, bool);
     callback favorite-toggle();
     callback sort(int);
     callback row-pressed(int, KeyboardModifiers);
@@ -987,6 +999,9 @@ export component AppWindow inherits Window {
                                 if root.tab-dragging && root.tab-drag-to >= 0 && root.tab-drag-to != i {
                                     root.tab-move(i, root.tab-drag-to);
                                 }
+                                if root.tab-dragging {
+                                    root.tab-release(i, e.kind == PointerEventKind.up);
+                                }
                                 root.tab-drag-from = -1;
                                 root.tab-drag-to = -1;
                                 root.tab-dragging = false;
@@ -995,10 +1010,11 @@ export component AppWindow inherits Window {
                         moved => {
                             if root.tab-drag-from == i {
                                 let dx = self.mouse-x - self.pressed-x;
-                                if root.tab-dragging || abs(dx) > 6px {
+                                if root.tab-dragging || abs(dx) > 6px || abs(self.mouse-y - self.pressed-y) > 6px {
                                     root.tab-dragging = true;
                                     let target = i + round(dx / (root.tab-w + 2px));
                                     root.tab-drag-to = min(max(target, 0), root.tabs.length - 1);
+                                    root.tab-drag(i);
                                 }
                             }
                         }
@@ -1307,10 +1323,14 @@ export component AppWindow inherits Window {
                     }
                 }
                 // Narrow until it is clicked (focused) or holds a query.
+                // Hidden on very narrow windows so the address bar keeps room; shrinks before that.
                 search-box := LineEdit {
+                    visible: !root.narrow;
                     property <bool> wide: self.has-focus || root.search-text != "";
-                    width: wide ? 340px : 170px;
-                    animate width { duration: 120ms; easing: ease-out; }
+                    preferred-width: root.narrow ? 0px : wide ? 340px : 170px;
+                    min-width: root.narrow ? 0px : 60px;
+                    horizontal-stretch: 0;
+                    animate preferred-width { duration: 120ms; easing: ease-out; }
                     enabled: !root.this-pc;
                     placeholder-text: root.this-pc
                         ? @tr("Search folders only")
@@ -1321,6 +1341,7 @@ export component AppWindow inherits Window {
                     }
                 }
                 search-options-button := KebabButton {
+                    visible: !root.narrow;
                     clicked => {
                         root.search-options-open = !root.search-options-open;
                     }
@@ -1336,7 +1357,8 @@ export component AppWindow inherits Window {
             HorizontalLayout {
                 vertical-stretch: 1;
 
-                Sidebar {
+                // Hidden when narrow so the file list keeps its room; the address bar still reaches every place.
+                if !root.narrow: Sidebar {
                     width: 196px;
                     vertical-stretch: 1;
                     favorites: root.favorites;
@@ -1362,7 +1384,7 @@ export component AppWindow inherits Window {
                         root.history(d);
                     }
                 }
-                Rectangle {
+                if !root.narrow: Rectangle {
                     width: 1px;
                     background: Palette.border;
                 }
@@ -1701,7 +1723,7 @@ export component AppWindow inherits Window {
                                             x: 0;
                                             y: 0;
                                             width: parent.width;
-                                            height: parent.height - 4px;
+                                            height: parent.height;
                                             text: r.date;
                                             overflow: elide;
                                             vertical-alignment: center;

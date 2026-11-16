@@ -38,12 +38,15 @@ use windows::Win32::UI::Shell::{
 };
 use windows::Win32::UI::WindowsAndMessaging::{
     AllowSetForegroundWindow, GetClientRect, GetCursorPos, GetWindowRect, HTBOTTOM, HTBOTTOMLEFT, HTBOTTOMRIGHT, HTLEFT, HTRIGHT,
-    HTTOP, HTTOPLEFT, HTTOPRIGHT, IsZoomed, PostMessageW, WM_CLOSE, WM_DEVICECHANGE, WM_NCHITTEST, WM_SIZE,
-    WM_XBUTTONDOWN, WM_XBUTTONUP, XBUTTON1, XBUTTON2,
+    HTTOP, HTTOPLEFT, HTTOPRIGHT, IsZoomed, MINMAXINFO, PostMessageW, SWP_NOACTIVATE, SWP_NOSIZE, SWP_NOZORDER, SetWindowPos,
+    WM_CLOSE, WM_COPYDATA, WM_DEVICECHANGE, WM_GETMINMAXINFO, WM_NCHITTEST, WM_SIZE, WM_XBUTTONDOWN, WM_XBUTTONUP, XBUTTON1,
+    XBUTTON2,
 };
+use windows::Win32::UI::HiDpi::GetDpiForWindow;
 
 mod dnd;
 mod popup;
+mod tabdrag;
 mod tools;
 mod tree;
 mod update;
@@ -799,6 +802,61 @@ impl App {
         self.sync_tabs();
     }
 
+    /// This window's screen rectangle and the strip's height, both in physical pixels.
+    fn frame(&self) -> Option<(RECT, i32)> {
+        let mut rect = RECT::default();
+        unsafe { GetWindowRect(HWND(self.hwnd() as _), &mut rect) }.ok()?;
+        Some((rect, (46.0 * self.ui().window().scale_factor()) as i32))
+    }
+
+    /// The pointer moved while dragging tab `i`: outside the strip, a ghost of the tab follows it.
+    fn tab_drag(&self, i: usize) {
+        let (x, y) = cursor_pos();
+        let Some((r, strip)) = self.frame() else { return };
+        let title = self.tabs.borrow().get(i).map(|t| t.title());
+        let in_strip = (r.left..r.right).contains(&x) && (r.top..r.top + strip).contains(&y);
+        match title {
+            Some(title) if !in_strip => {
+                let s = self.ui().window().scale_factor();
+                tabdrag::ghost(Some((&title, x - (60.0 * s) as i32, y - (16.0 * s) as i32, s)));
+            }
+            _ => tabdrag::ghost(None),
+        }
+    }
+
+    /// Tab `i` was let go (`done`) or the drag was cancelled. Over another fex window's strip the
+    /// tab moves there; outside this window it moves to the pointer: a lone tab moves the window,
+    /// otherwise the tab becomes a new window.
+    fn tab_release(&self, i: usize, done: bool) {
+        tabdrag::ghost(None);
+        let (x, y) = cursor_pos();
+        let (Some((r, _)), true) = (self.frame(), done) else { return };
+        let Some(tab) = self.tabs.borrow().get(i).cloned() else { return };
+        let cwd = tab.cwd.borrow().clone();
+        let me = HWND(self.hwnd() as _);
+        let s = self.ui().window().scale_factor();
+        if let Some(other) = tabdrag::other_fex_at(me, x, y, s) {
+            if tabdrag::send_tab(other, me, &cwd) {
+                self.close_tab(i); // the last tab closing quits this window
+            }
+            return;
+        }
+        if (r.left..r.right).contains(&x) && (r.top..r.bottom).contains(&y) {
+            return;
+        }
+        // Put the window's top-left just up and left of the pointer, so it sits on the tab.
+        let (nx, ny) = (x - (60.0 * s) as i32, y - (16.0 * s) as i32);
+        if self.tabs.borrow().len() == 1 {
+            let _ = unsafe { SetWindowPos(me, None, nx, ny, 0, 0, SWP_NOSIZE | SWP_NOZORDER | SWP_NOACTIVATE) };
+            return;
+        }
+        let exe = std::env::current_exe().unwrap_or_default();
+        match std::process::Command::new(exe).arg(format!("--at={nx},{ny}")).arg(&cwd).spawn() {
+            Ok(_) => self.close_tab(i),
+            Err(e) => self.set_note(&tab, t!("Launch failed: {}", e)),
+        }
+    }
+
     fn cycle_tab(&self, back: bool) {
         let n = self.tabs.borrow().len();
         let i = self.active.get();
@@ -1285,7 +1343,9 @@ impl App {
         let (key, desc) = t.sort.get();
         // ponytail: the folder tree is flattened on the UI thread; a huge folder may stall briefly.
         if t.search.borrow().is_none() && TREE_VIEW.load(Relaxed) && !is_this_pc(&t.cwd.borrow()) {
+            let start = Instant::now();
             self.browse_flatten(t);
+            *t.note.borrow_mut() = t!("List {} ms · sort {} ms", format!("{:.1}", t.list_ms.get()), format!("{:.1}", ms(start.elapsed())));
             self.apply_after(t);
             t.rows.notify.reset();
             self.reveal_cursor(t);
@@ -4092,6 +4152,8 @@ fn save_favorites(favorites: &[PathBuf]) {
 
 /// Maximized state of the last DWM frame update.
 static FRAME_MAXIMIZED: AtomicBool = AtomicBool::new(false);
+/// Screen position requested by `--at=x,y`, applied once the native window exists.
+static AT: std::sync::OnceLock<(i32, i32)> = std::sync::OnceLock::new();
 
 /// A no-frame window loses the DWM border and drop shadow. Extending the frame by one
 /// pixel restores both without covering the client area; a maximized window must drop
@@ -4141,8 +4203,18 @@ unsafe extern "system" fn history_subclass(
     if msg == WM_SIZE && FRAME_MAXIMIZED.load(Relaxed) != unsafe { IsZoomed(hwnd) }.as_bool() {
         apply_window_frame(hwnd);
     }
+    if msg == WM_GETMINMAXINFO {
+        // The window's floor, 320×200 logical pixels; Slint's min-width does not reach the OS window here.
+        let scale = unsafe { GetDpiForWindow(hwnd) } as f64 / 96.0;
+        let info = unsafe { &mut *(lparam.0 as *mut MINMAXINFO) };
+        info.ptMinTrackSize = POINT { x: (320.0 * scale) as i32, y: (200.0 * scale) as i32 };
+        return LRESULT(0);
+    }
     if msg == WM_DEVICECHANGE {
         post(|a| a.devices_changed());
+    }
+    if msg == WM_COPYDATA {
+        return tabdrag::received(lparam);
     }
     if msg == WM_XBUTTONDOWN {
         let button = ((wparam.0 >> 16) & 0xffff) as u16;
@@ -4216,7 +4288,12 @@ fn install_native_hooks(weak: slint::Weak<AppWindow>, tries: u32) {
         let hwnd = app(|a| a.hwnd());
         if hwnd != 0 {
             fit_window_to_screen(&ui, HWND(hwnd as _));
+            // Physical pixels straight to Win32: Slint's set_position scales them.
+            if let Some(&(x, y)) = AT.get() {
+                let _ = unsafe { SetWindowPos(HWND(hwnd as _), None, x, y, 0, 0, SWP_NOSIZE | SWP_NOZORDER | SWP_NOACTIVATE) };
+            }
             apply_window_frame(HWND(hwnd as _));
+            tabdrag::mark(hwnd);
             install_history_buttons(hwnd);
             dnd::install(hwnd, dnd::Hooks { target_at: dnd_target_at, dropped: dnd_dropped, hover: dnd_hover, scroll: dnd_scroll, wheel: dnd_wheel });
         } else if tries < 100 {
@@ -4367,6 +4444,8 @@ fn main() -> Result<(), slint::PlatformError> {
         a.ui().set_home_path(cwd.into());
     }));
     ui.on_tab_move(|from, to| app(|a| a.move_tab(from as usize, to as usize)));
+    ui.on_tab_drag(|i| app(|a| a.tab_drag(i as usize)));
+    ui.on_tab_release(|i, done| app(|a| a.tab_release(i as usize, done)));
     ui.on_favorite_toggle(|| app(|a| a.toggle_favorite()));
     ui.on_sort(|c| app(|a| a.sort(c as usize)));
     ui.on_row_pressed(|r, m| app(|a| a.row_pressed(r as usize, m.control, m.shift)));
@@ -4416,7 +4495,14 @@ fn main() -> Result<(), slint::PlatformError> {
         app(|a| a.key(&e.text, e.modifiers.control, e.modifiers.shift, e.modifiers.alt, in_list))
     });
 
-    let args: Vec<String> = std::env::args().skip(1).collect();
+    let mut args: Vec<String> = std::env::args().skip(1).collect();
+    // `--at=x,y` (from a torn-off tab) places the window's top-left corner in screen pixels.
+    if let Some(at) = args.iter().position(|a| a.starts_with("--at=")).map(|i| args.remove(i)) {
+        let xy: Vec<i32> = at[5..].split(',').filter_map(|v| v.trim().parse().ok()).collect();
+        if let [x, y] = xy[..] {
+            let _ = AT.set((x, y));
+        }
+    }
     let session = if args.is_empty() { update::take_session() } else { None };
     if let Some((active, tabs)) = session {
         for t in tabs {
