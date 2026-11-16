@@ -795,7 +795,8 @@ export component AppWindow inherits Window {
     // Tab drag beyond the strip: Rust shows a ghost under the pointer and, on release (true) or
     // cancel (false), moves the tab to another fex window or out into its own window.
     callback tab-drag(int);
-    callback tab-release(int, bool);
+    // Returns true when the tab left this strip (the reorder must then be skipped).
+    callback tab-release(int, bool) -> bool;
     callback favorite-toggle();
     callback sort(int);
     callback row-pressed(int, KeyboardModifiers);
@@ -996,11 +997,8 @@ export component AppWindow inherits Window {
                                 root.history(1);
                             }
                             if (e.kind == PointerEventKind.up || e.kind == PointerEventKind.cancel) && root.tab-drag-from == i {
-                                if root.tab-dragging && root.tab-drag-to >= 0 && root.tab-drag-to != i {
+                                if root.tab-dragging && !root.tab-release(i, e.kind == PointerEventKind.up) && root.tab-drag-to >= 0 && root.tab-drag-to != i {
                                     root.tab-move(i, root.tab-drag-to);
-                                }
-                                if root.tab-dragging {
-                                    root.tab-release(i, e.kind == PointerEventKind.up);
                                 }
                                 root.tab-drag-from = -1;
                                 root.tab-drag-to = -1;

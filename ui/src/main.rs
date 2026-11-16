@@ -815,6 +815,9 @@ impl App {
         let Some((r, strip)) = self.frame() else { return };
         let title = self.tabs.borrow().get(i).map(|t| t.title());
         let in_strip = (r.left..r.right).contains(&x) && (r.top..r.top + strip).contains(&y);
+        // Tint the strip of another fex window the tab would land in.
+        let s = self.ui().window().scale_factor();
+        dnd::highlight(tabdrag::other_fex_at(HWND(self.hwnd() as _), x, y, s).map(|(_, strip)| strip));
         match title {
             Some(title) if !in_strip => {
                 let s = self.ui().window().scale_factor();
@@ -827,33 +830,43 @@ impl App {
     /// Tab `i` was let go (`done`) or the drag was cancelled. Over another fex window's strip the
     /// tab moves there; outside this window it moves to the pointer: a lone tab moves the window,
     /// otherwise the tab becomes a new window.
-    fn tab_release(&self, i: usize, done: bool) {
+    /// Returns true when the tab left this strip, so the caller must not reorder: `i` is the
+    /// tab the drag started on, and a reorder before this call would have changed what it names.
+    fn tab_release(&self, i: usize, done: bool) -> bool {
         tabdrag::ghost(None);
+        dnd::highlight(None);
         let (x, y) = cursor_pos();
-        let (Some((r, _)), true) = (self.frame(), done) else { return };
-        let Some(tab) = self.tabs.borrow().get(i).cloned() else { return };
+        let (Some((r, _)), true) = (self.frame(), done) else { return false };
+        let Some(tab) = self.tabs.borrow().get(i).cloned() else { return false };
         let cwd = tab.cwd.borrow().clone();
         let me = HWND(self.hwnd() as _);
         let s = self.ui().window().scale_factor();
-        if let Some(other) = tabdrag::other_fex_at(me, x, y, s) {
-            if tabdrag::send_tab(other, me, &cwd) {
+        if let Some((other, _)) = tabdrag::other_fex_at(me, x, y, s) {
+            let sent = tabdrag::send_tab(other, me, &cwd);
+            if sent {
                 self.close_tab(i); // the last tab closing quits this window
             }
-            return;
+            return sent;
         }
         if (r.left..r.right).contains(&x) && (r.top..r.bottom).contains(&y) {
-            return;
+            return false;
         }
         // Put the window's top-left just up and left of the pointer, so it sits on the tab.
         let (nx, ny) = (x - (60.0 * s) as i32, y - (16.0 * s) as i32);
         if self.tabs.borrow().len() == 1 {
             let _ = unsafe { SetWindowPos(me, None, nx, ny, 0, 0, SWP_NOSIZE | SWP_NOZORDER | SWP_NOACTIVATE) };
-            return;
+            return true;
         }
         let exe = std::env::current_exe().unwrap_or_default();
         match std::process::Command::new(exe).arg(format!("--at={nx},{ny}")).arg(&cwd).spawn() {
-            Ok(_) => self.close_tab(i),
-            Err(e) => self.set_note(&tab, t!("Launch failed: {}", e)),
+            Ok(_) => {
+                self.close_tab(i);
+                true
+            }
+            Err(e) => {
+                self.set_note(&tab, t!("Launch failed: {}", e));
+                false
+            }
         }
     }
 

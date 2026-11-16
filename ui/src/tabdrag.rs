@@ -5,7 +5,7 @@ use std::cell::{Cell, RefCell};
 use std::os::windows::ffi::OsStrExt;
 use std::path::{Path, PathBuf};
 
-use windows::Win32::Foundation::{COLORREF, HANDLE, HWND, LPARAM, LRESULT, POINT, RECT, WPARAM};
+use windows::Win32::Foundation::{COLORREF, HANDLE, HWND, LPARAM, LRESULT, RECT, WPARAM};
 use windows::Win32::Graphics::Gdi::*;
 use windows::Win32::System::DataExchange::COPYDATASTRUCT;
 use windows::Win32::UI::WindowsAndMessaging::*;
@@ -101,17 +101,38 @@ unsafe extern "system" fn ghost_proc(h: HWND, m: u32, wp: WPARAM, lp: LPARAM) ->
     unsafe { DefWindowProcW(h, m, wp, lp) }
 }
 
-/// The main window of another fex process if the screen point is on its tab strip.
-pub fn other_fex_at(own: HWND, x: i32, y: i32, scale: f32) -> Option<HWND> {
-    unsafe {
-        let root = GetAncestor(WindowFromPoint(POINT { x, y }), GA_ROOT);
-        if root.0.is_null() || root == own || GetPropW(root, w!("FexMain")).0.is_null() {
-            return None;
-        }
-        let mut r = RECT::default();
-        GetWindowRect(root, &mut r).ok()?;
-        (y < r.top + (46.0 * scale) as i32).then_some(root)
+/// The main window of another fex process and its tab strip (screen px) if the point is on the strip.
+pub fn other_fex_at(own: HWND, x: i32, y: i32, scale: f32) -> Option<(HWND, RECT)> {
+    struct Query {
+        x: i32,
+        y: i32,
+        hit: HWND,
     }
+    // Windows come top to bottom; skip our click-through ghost and highlight, which sit on top.
+    unsafe extern "system" fn each(h: HWND, l: LPARAM) -> windows::core::BOOL {
+        let q = unsafe { &mut *(l.0 as *mut Query) };
+        let mut r = RECT::default();
+        let see_through = unsafe { GetWindowLongW(h, GWL_EXSTYLE) } as u32 & WS_EX_TRANSPARENT.0 != 0;
+        let hit = unsafe { IsWindowVisible(h) }.as_bool()
+            && !see_through
+            && unsafe { GetWindowRect(h, &mut r) }.is_ok()
+            && (r.left..r.right).contains(&q.x)
+            && (r.top..r.bottom).contains(&q.y);
+        if hit {
+            q.hit = h;
+        }
+        (!hit).into()
+    }
+    let mut q = Query { x, y, hit: HWND::default() };
+    let _ = unsafe { EnumWindows(Some(each), LPARAM(&mut q as *mut Query as isize)) };
+    let root = q.hit;
+    if root.0.is_null() || root == own || unsafe { GetPropW(root, w!("FexMain")) }.0.is_null() {
+        return None;
+    }
+    let mut r = RECT::default();
+    unsafe { GetWindowRect(root, &mut r) }.ok()?;
+    let strip = RECT { bottom: r.top + (46.0 * scale) as i32, ..r };
+    (y < strip.bottom).then_some((root, strip))
 }
 
 /// Asks another fex window to open `path` in a new tab and brings it to the front.
