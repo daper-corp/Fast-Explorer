@@ -15,6 +15,10 @@ export struct Row {
     online: bool,
     // Cloud item set to "Always keep on this device".
     pinned: bool,
+    // Uploading (1) or downloading (2) right now; 0 = idle.
+    xfer: int,
+    // Progress 0..1 of that transfer, or -1 when the provider reports none.
+    xfer-fraction: float,
     // UTF-8 byte length of the name without its extension (pre-selected when renaming).
     stem: int,
     // Folder of a search hit; empty when browsing a folder.
@@ -719,6 +723,9 @@ export component AppWindow inherits Window {
     private property <bool> address-editing: false;
     private property <string> address-text;
     in property <string> status;
+    // Cloud transfers in the current folder, with their average progress (-1 = unknown).
+    in property <string> transfer-text;
+    in property <float> transfer-fraction: -1;
     // What the user typed for type-ahead, shown as a short toast over the list.
     in property <string> key-hint;
     // The current folder is in the sidebar's favorites (filled star in the toolbar).
@@ -1571,6 +1578,16 @@ export component AppWindow inherits Window {
                                     background: i == root.drop-row ? Palette.accent-background.transparentize(0.6) : r.selected ? Palette.accent-background.transparentize(list-focus.has-focus ? 0.75 : 0.88) : row-touch.has-hover ? Palette.foreground.transparentize(0.95) : transparent;
                                 }
 
+                                // Transfer progress under the name column.
+                                if r.xfer != 0 && r.xfer-fraction >= 0: Rectangle {
+                                    x: 4px;
+                                    y: parent.height - 3px;
+                                    height: 2px;
+                                    width: max(0px, root.w-name - 4px) * r.xfer-fraction;
+                                    border-radius: 1px;
+                                    background: #2f7fd8;
+                                }
+
                                 row-touch := TouchArea {
                                     x: 0px;
                                     width: parent.cols-w;
@@ -1656,23 +1673,23 @@ export component AppWindow inherits Window {
                                             image-fit: contain;
                                         }
                                         // Cloud status badge in the icon's corner, like Explorer's overlay.
-                                        if r.online || r.pinned: Rectangle {
+                                        if r.online || r.pinned || r.xfer != 0: Rectangle {
                                             x: -2px;
                                             y: parent.height / 2 + 1px;
                                             width: 10px;
                                             height: 10px;
                                             border-radius: 5px;
-                                            background: r.pinned ? #2e9e44 : Palette.background;
+                                            background: r.xfer != 0 ? #2f7fd8 : r.pinned ? #2e9e44 : Palette.background;
                                             Path {
                                                 width: 10px;
                                                 height: 10px;
                                                 viewbox-width: 10;
                                                 viewbox-height: 10;
                                                 fill: transparent;
-                                                stroke: r.pinned ? white : #2f7fd8;
+                                                stroke: r.xfer != 0 || r.pinned ? white : #2f7fd8;
                                                 stroke-width: 1.2px;
-                                                // Check mark for "always keep", cloud outline for online-only.
-                                                commands: r.pinned ? "M 2.5 5.2 L 4.3 7 L 7.6 3.3" : "M 2.6 7.5 A 1.8 1.8 0 0 1 2.8 4 A 2.4 2.4 0 0 1 7.2 4.2 A 1.7 1.7 0 0 1 7.4 7.5 Z";
+                                                // Arrow up/down while uploading/downloading, check mark for "always keep", cloud outline for online-only.
+                                                commands: r.xfer == 1 ? "M 5 8 L 5 2.5 M 2.7 4.8 L 5 2.5 L 7.3 4.8" : r.xfer == 2 ? "M 5 2 L 5 7.5 M 2.7 5.2 L 5 7.5 L 7.3 5.2" : r.pinned ? "M 2.5 5.2 L 4.3 7 L 7.6 3.3" : "M 2.6 7.5 A 1.8 1.8 0 0 1 2.8 4 A 2.4 2.4 0 0 1 7.2 4.2 A 1.7 1.7 0 0 1 7.4 7.5 Z";
                                             }
                                         }
                                     }
@@ -1831,9 +1848,31 @@ export component AppWindow inherits Window {
             HorizontalLayout {
                 padding: 6px;
                 padding-left: 10px;
+                spacing: 12px;
                 Text {
                     text: root.status;
                     color: root.dim;
+                    horizontal-stretch: 1;
+                }
+                if root.transfer-text != "": Text {
+                    text: root.transfer-text;
+                    color: #2f7fd8;
+                    vertical-alignment: center;
+                }
+                if root.transfer-text != "" && root.transfer-fraction >= 0: Rectangle {
+                    width: 90px;
+                    Rectangle {
+                        y: (parent.height - 6px) / 2;
+                        height: 6px;
+                        border-radius: 3px;
+                        background: Palette.foreground.transparentize(0.85);
+                        Rectangle {
+                            x: 0px;
+                            width: parent.width * root.transfer-fraction;
+                            border-radius: 3px;
+                            background: #2f7fd8;
+                        }
+                    }
                 }
             }
         }

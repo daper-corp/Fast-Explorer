@@ -106,3 +106,6 @@ Properties	속성
 Eject	꺼내기
 Format…	포맷…
 Downloading from the cloud before opening: {}	클라우드에서 내려받은 뒤 엽니다: {}
+Uploading {} items	{}개 업로드 중
+Downloading {} items	{}개 다운로드 중
+ · {}%	 · {}%

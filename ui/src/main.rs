@@ -10,6 +10,7 @@ use std::sync::atomic::{AtomicBool, AtomicU64, Ordering::Relaxed, Ordering::SeqC
 use std::thread;
 use std::time::{Duration, Instant};
 
+use fex_core::cloud::{self, Kind};
 use fex_core::icons::{self, IconKey};
 use fex_core::index::{self, QueryError, Results};
 use fex_core::menu::{HANG_LIMIT, MenuHost, MenuItem, MenuResult, Request};
@@ -157,6 +158,8 @@ struct Rows {
     dates: RefCell<Vec<String>>,
     sizes: RefCell<Vec<String>>,
     usage: RefCell<Vec<f32>>,
+    /// Cloud files uploading or downloading right now, by entry index (plain folder listings only).
+    transfers: RefCell<HashMap<u32, cloud::Transfer>>,
     /// The folder being listed (for icons that come from the file itself).
     base: RefCell<PathBuf>,
     notify: ModelNotify,
@@ -238,6 +241,7 @@ impl Model for Rows {
             None => format_size(e.size),
         };
         let meta = self.meta.borrow().get(i as usize).copied().unwrap_or_default();
+        let xfer = self.transfers.borrow().get(&i).copied();
         Some(Row {
             date: date.into(),
             kind: kind.into(),
@@ -248,6 +252,8 @@ impl Model for Rows {
             hidden: e.attrs & 0x2 != 0,
             online: e.online_only(),
             pinned: e.pinned(),
+            xfer: xfer.map_or(0, |x| if x.kind == Kind::Upload { 1 } else { 2 }),
+            xfer_fraction: xfer.and_then(|x| x.fraction).unwrap_or(-1.0),
             stem: stem as i32,
             name: name.into(),
             location: self.locations.borrow().get(i as usize).map(|s| s.as_str().into()).unwrap_or_default(),
@@ -297,6 +303,7 @@ impl Rows {
         self.dates.borrow_mut().clear();
         self.sizes.borrow_mut().clear();
         self.usage.borrow_mut().clear();
+        self.transfers.borrow_mut().clear();
         self.editing.set(None);
         self.notify.reset();
     }
@@ -311,6 +318,7 @@ impl Rows {
         self.dates.borrow_mut().clear();
         self.sizes.borrow_mut().clear();
         self.usage.borrow_mut().clear();
+        self.transfers.borrow_mut().clear();
         self.editing.set(None);
         self.apply_flat(flat);
     }
@@ -637,6 +645,8 @@ struct App {
     rubber_base: RefCell<Vec<bool>>,
     rubber_last: Cell<(usize, usize)>,
     drop_row: Cell<i32>,
+    /// A cloud-transfer poll is running on a worker.
+    xfer_busy: Cell<bool>,
 }
 
 thread_local! {
@@ -1089,6 +1099,7 @@ impl App {
             return;
         }
         self.ui().set_status(self.status_text(t).into());
+        self.set_transfer_status(t);
         self.prefetch_for(t);
     }
 
@@ -1097,7 +1108,83 @@ impl App {
     fn update_status_text(&self, t: &Tab) {
         if self.is_active(t) {
             self.ui().set_status(self.status_text(t).into());
+            self.set_transfer_status(t);
         }
+    }
+
+    /// The status bar's cloud summary: "Uploading 3 items · 42%" with a bar, empty when idle.
+    fn set_transfer_status(&self, t: &Tab) {
+        let x = t.rows.transfers.borrow();
+        let count = |k| x.values().filter(|v| v.kind == k).count();
+        let (up, down) = (count(Kind::Upload), count(Kind::Download));
+        let known: Vec<f32> = x.values().filter_map(|v| v.fraction).collect();
+        let pct = (!known.is_empty()).then(|| known.iter().sum::<f32>() / known.len() as f32);
+        let mut parts = vec![];
+        if up > 0 {
+            parts.push(t!("Uploading {} items", up));
+        }
+        if down > 0 {
+            parts.push(t!("Downloading {} items", down));
+        }
+        let mut text = parts.join(" · ");
+        if let Some(p) = pct {
+            text += &t!(" · {}%", (p * 100.0).round() as i32);
+        }
+        let ui = self.ui();
+        ui.set_transfer_text(text.into());
+        ui.set_transfer_fraction(pct.unwrap_or(-1.0));
+    }
+
+    /// Asks a worker which of the visible files are syncing with the cloud right now.
+    fn poll_transfers(&self) {
+        let t = self.tab();
+        let plain = t.search.borrow().is_none() && t.pending.borrow().is_none() && t.rows.paths.borrow().is_empty();
+        let cwd = t.cwd.borrow().clone();
+        if !plain || is_this_pc(&cwd) || self.xfer_busy.get() {
+            return;
+        }
+        let ui = self.ui();
+        let h = ui.get_row_height().max(1.0);
+        let first = (-ui.get_list_y() / h).max(0.0) as usize;
+        let last = (first + (ui.get_list_height() / h) as usize + 2).min(t.rows.len());
+        let files: Vec<(u32, PathBuf, u32)> = (first..last)
+            .filter_map(|r| t.rows.entry(r))
+            .filter_map(|i| {
+                let e = &t.rows.entries.borrow()[i as usize];
+                (!e.is_dir()).then(|| (i, cwd.join(e.os_name()), e.attrs))
+            })
+            .collect();
+        let snapshot = t.rows.entries.borrow().clone();
+        if files.is_empty() && t.rows.transfers.borrow().is_empty() {
+            return;
+        }
+        self.xfer_busy.set(true);
+        let id = t.id;
+        thread::spawn(move || {
+            cloud::init_thread();
+            let found: Vec<_> = match cloud::in_sync_root(&cwd) {
+                true => files.iter().filter_map(|(i, p, a)| Some((*i, cloud::transfer(p, *a)?))).collect(),
+                false => vec![],
+            };
+            post(move |a| a.apply_transfers(id, snapshot, found));
+        });
+    }
+
+    fn apply_transfers(&self, id: u64, snapshot: Arc<Vec<Entry>>, found: Vec<(u32, cloud::Transfer)>) {
+        self.xfer_busy.set(false);
+        // The listing was replaced while the worker ran: its indexes mean nothing now.
+        let Some(t) = self.find(id).filter(|t| Arc::ptr_eq(&t.rows.entries.borrow(), &snapshot)) else { return };
+        let new: HashMap<u32, cloud::Transfer> = found.into_iter().collect();
+        let old = t.rows.transfers.replace(new.clone());
+        if old == new {
+            return;
+        }
+        for i in old.keys().chain(new.keys()).filter(|i| old.get(i) != new.get(i)) {
+            if let Some(r) = t.rows.row_of(*i) {
+                t.rows.notify.row_changed(r);
+            }
+        }
+        self.update_status_text(&t);
     }
 
     /// Tells the UI the widest visible text in each column, for double-click auto-fit.
@@ -4446,6 +4533,7 @@ fn main() -> Result<(), slint::PlatformError> {
             rubber_base: RefCell::default(),
             rubber_last: Cell::new((usize::MAX, 0)),
             drop_row: Cell::new(-1),
+            xfer_busy: Cell::new(false),
         });
     });
 
@@ -4564,6 +4652,10 @@ fn main() -> Result<(), slint::PlatformError> {
             a.sync_places();
         });
     });
+    // Cloud sync state has no change notification: poll the visible files while a cloud folder is shown.
+    // ponytail: fixed 1.5 s poll over the visible rows only; add a per-provider watcher if this shows up in profiles.
+    let xfer_timer = slint::Timer::default();
+    xfer_timer.start(slint::TimerMode::Repeated, Duration::from_millis(1500), || app(|a| a.poll_transfers()));
     ui.run()
 }
 
