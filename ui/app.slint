@@ -723,6 +723,8 @@ export component AppWindow inherits Window {
     private property <bool> address-editing: false;
     private property <string> address-text;
     in property <string> status;
+    // Shown over the empty list when a finished search found nothing.
+    in property <string> empty-text;
     // Cloud transfers in the current folder, with their average progress (-1 = unknown).
     in property <string> transfer-text;
     in property <float> transfer-fraction: -1;
@@ -1558,6 +1560,15 @@ export component AppWindow inherits Window {
                                     root.rubber-move(blank-touch.pressed-y - root.list-vmargin, blank-touch.mouse-y - root.list-vmargin);
                                 }
                             }
+
+                        if root.empty-text != "" && root.rows.length == 0: Text {
+                            y: 24px;
+                            width: parent.width;
+                            horizontal-alignment: center;
+                            text: root.empty-text;
+                            color: Palette.foreground.transparentize(0.45);
+                            font-size: 14px;
+                        }
 
                         list := ListView {
                             x: root.list-margin;

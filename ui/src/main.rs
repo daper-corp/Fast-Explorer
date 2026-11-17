@@ -535,6 +535,8 @@ struct Tab {
     search_options: Cell<SearchOptions>,
     /// Matching items in the current search (hidden ones excluded).
     hit_count: Cell<usize>,
+    /// The current search has finished (an empty list then means "no results").
+    search_done: Cell<bool>,
     /// Reports changes made to the folder by other programs.
     watch: RefCell<Option<watch::DirWatch>>,
     /// A watcher-triggered refresh is scheduled; further events join it.
@@ -562,6 +564,7 @@ impl Tab {
             search: RefCell::default(),
             search_options: Cell::default(),
             hit_count: Cell::new(0),
+            search_done: Cell::new(false),
             watch: RefCell::new(watch::DirWatch::new(move || post(move |a| a.folder_changed(id))).ok()),
             refresh_due: Cell::new(false),
         }
@@ -1099,6 +1102,8 @@ impl App {
             return;
         }
         self.ui().set_status(self.status_text(t).into());
+        let none = t.search.borrow().is_some() && t.search_done.get() && t.hit_count.get() == 0;
+        self.ui().set_empty_text(if none { t!("No results") } else { String::new() }.into());
         self.set_transfer_status(t);
         self.prefetch_for(t);
     }
@@ -2357,6 +2362,7 @@ impl App {
         let returned = res.hits.len();
         let (more, indexing) = (res.more, res.indexing);
         let root = scope.root().map(Path::to_path_buf);
+        t.search_done.set(true);
         self.install_search(&t, query.clone(), scope, entries, tree);
         let mut note = t!("Search {} ms", format!("{:.0}", ms(took)));
         if let Some(root) = root.filter(|r| !same_path(r, &t.cwd.borrow())) {
@@ -2407,6 +2413,7 @@ impl App {
             return;
         }
         let root = scope.root().map(Path::to_path_buf);
+        t.search_done.set(true);
         self.install_search(&t, query, scope, entries, tree);
         let mut note = t!("Search {} ms", format!("{:.0}", ms(took)));
         if let Some(root) = root.filter(|r| !same_path(r, &t.cwd.borrow())) {
@@ -2441,6 +2448,7 @@ impl App {
         tree.root_entry(&mut entries, &root, entry);
         t.rows.replace_search(entries, FlatTree::default());
         t.hit_count.set(0);
+        t.search_done.set(false);
         t.cursor.set(None);
         t.anchor.set(None);
         *t.search.borrow_mut() = Some(Search { query, scope: Scope::Under(root), tree, options: t.search_options.get() });
@@ -2482,6 +2490,7 @@ impl App {
         if self.search_seq.load(SeqCst) != seq {
             return;
         }
+        t.search_done.set(true);
         let mut note = t!("Folder search {} s", format!("{:.1}", took.as_secs_f64()));
         if capped {
             note += &t!(" · stopped at the first {}", SEARCH_LIMIT);
