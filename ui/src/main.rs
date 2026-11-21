@@ -1950,7 +1950,16 @@ impl App {
         let is = |k: Key| text == SharedString::from(k).as_str();
         // Ctrl+letter may arrive as a control character (Ctrl+C = U+0003).
         let ch = match text.chars().next() {
-            Some(c @ '\u{1}'..='\u{1a}') if ctrl => char::from(c as u8 + b'a' - 1),
+            // Slint's modifier keys (Shift/Control/Alt/Meta = U+0010..U+0018) share these codes, so
+            // pressing Ctrl+Win would read as Ctrl+W and quit. Accept them only while the letter is down.
+            Some(c @ '\u{10}'..='\u{1a}') if ctrl => {
+                let letter = c as u8 + b'a' - 1;
+                if unsafe { GetAsyncKeyState(letter.to_ascii_uppercase() as i32) } >= 0 {
+                    return false;
+                }
+                char::from(letter)
+            }
+            Some(c @ '\u{1}'..='\u{f}') if ctrl => char::from(c as u8 + b'a' - 1),
             Some(c) => c.to_ascii_lowercase(),
             None => return false,
         };
